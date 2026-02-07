@@ -10,6 +10,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, Gtk
 
 
+# Базовый набор статусов качества, который может быть расширен позже.
 STATUS_OPTIONS = [
     "полный",
     "отсутствует",
@@ -23,13 +24,16 @@ STATUS_OPTIONS = [
 ]
 
 
+# Обёртка над SQLite для хранения карточек тайтлов и медиафайлов.
 class Database:
+    # Инициализируем соединение и создаём таблицы, если их ещё нет.
     def __init__(self, path: str) -> None:
         self.path = path
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self._init_schema()
 
+    # Создание схемы БД.
     def _init_schema(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -74,6 +78,7 @@ class Database:
         )
         self.conn.commit()
 
+    # Получение списка тайтлов с фильтрами по названию, тегам и статусам.
     def list_titles(self, query: str = "", tags: str = "", status_filter: str = ""):
         cur = self.conn.cursor()
         sql = "SELECT * FROM titles"
@@ -93,6 +98,7 @@ class Database:
         sql += " ORDER BY main_title COLLATE NOCASE"
         return cur.execute(sql, params).fetchall()
 
+    # Добавление нового тайтла и возврат его идентификатора.
     def add_title(self, data: dict) -> int:
         cur = self.conn.cursor()
         cur.execute(
@@ -132,6 +138,7 @@ class Database:
         self.conn.commit()
         return cur.lastrowid
 
+    # Обновление существующего тайтла.
     def update_title(self, title_id: int, data: dict) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -187,15 +194,18 @@ class Database:
         )
         self.conn.commit()
 
+    # Получение карточки тайтла по id.
     def get_title(self, title_id: int):
         cur = self.conn.cursor()
         return cur.execute("SELECT * FROM titles WHERE id=?", (title_id,)).fetchone()
 
+    # Удаление тайтла.
     def delete_title(self, title_id: int) -> None:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM titles WHERE id=?", (title_id,))
         self.conn.commit()
 
+    # Список медиафайлов по типу (image/video).
     def list_media(self, title_id: int, media_type: str):
         cur = self.conn.cursor()
         return cur.execute(
@@ -203,6 +213,7 @@ class Database:
             (title_id, media_type),
         ).fetchall()
 
+    # Добавление медиафайла к тайтлу.
     def add_media(self, title_id: int, media_type: str, path: str, info: str) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -212,8 +223,10 @@ class Database:
         self.conn.commit()
 
 
+# Извлечение информации о видео через pymediainfo или CLI mediainfo.
 class MediaInfo:
     @staticmethod
+    # Главная точка входа для описания видео.
     def describe_video(path: str) -> str:
         if os.path.isdir(path):
             return ""
@@ -223,6 +236,7 @@ class MediaInfo:
         return MediaInfo._from_cli(path)
 
     @staticmethod
+    # Извлечение через библиотеку pymediainfo, если она установлена.
     def _from_pymediainfo(path: str) -> str:
         try:
             from pymediainfo import MediaInfo as PyMediaInfo
@@ -247,6 +261,7 @@ class MediaInfo:
         return " | ".join([p.strip() for p in parts if p.strip()])
 
     @staticmethod
+    # Извлечение через CLI mediainfo (JSON).
     def _from_cli(path: str) -> str:
         try:
             result = subprocess.run(
@@ -282,7 +297,9 @@ class MediaInfo:
         return " | ".join([p.strip() for p in parts if p.strip()])
 
 
+# Главное окно приложения с тремя панелями.
 class HSorterWindow(Gtk.ApplicationWindow):
+    # Инициализация окна и построение интерфейса.
     def __init__(self, app: Gtk.Application, db: Database) -> None:
         super().__init__(application=app, title="HSorter")
         self.set_default_size(1400, 900)
@@ -293,6 +310,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._build_ui()
         self.refresh_titles()
 
+    # Общая разметка: три колонки.
     def _build_ui(self) -> None:
         root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         root.set_margin_top(10)
@@ -313,6 +331,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._build_details()
         self._build_media()
 
+    # Левая панель: библиотека тайтлов и фильтры.
     def _build_library(self) -> None:
         filter_frame = Gtk.Frame(label="Фильтр")
         filter_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -355,6 +374,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         buttons.pack_start(delete_button, False, False, 0)
         self.library_box.pack_start(buttons, False, False, 0)
 
+    # Центральная панель: карточка выбранного тайтла.
     def _build_details(self) -> None:
         header = Gtk.Label(label="Карточка тайтла")
         header.set_xalign(0)
@@ -381,19 +401,27 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         self.details_box.pack_start(cover_row, False, False, 0)
 
-        status_frame = Gtk.Frame(label="Статус")
-        status_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
-        status_grid.set_margin_top(6)
-        status_grid.set_margin_bottom(6)
-        status_grid.set_margin_start(6)
-        status_grid.set_margin_end(6)
-        status_frame.add(status_grid)
+        # Выпадающий чеклист статусов.
         self.status_checks = {}
-        for idx, status in enumerate(STATUS_OPTIONS):
+        self.status_button = Gtk.MenuButton(label="Статусы")
+        status_popover = Gtk.Popover.new(self.status_button)
+        status_popover.set_position(Gtk.PositionType.BOTTOM)
+        status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        status_box.set_margin_top(6)
+        status_box.set_margin_bottom(6)
+        status_box.set_margin_start(6)
+        status_box.set_margin_end(6)
+        status_scroller = Gtk.ScrolledWindow()
+        status_scroller.set_size_request(260, 180)
+        status_scroller.add(status_box)
+        status_popover.add(status_scroller)
+        for status in STATUS_OPTIONS:
             check = Gtk.CheckButton(label=status)
             self.status_checks[status] = check
-            status_grid.attach(check, idx % 3, idx // 3, 1, 1)
-        self.details_box.pack_start(status_frame, False, False, 0)
+            status_box.pack_start(check, False, False, 0)
+        self.status_button.set_popover(status_popover)
+        status_popover.show_all()
+        self.details_box.pack_start(self._row("Статус", self.status_button), False, False, 0)
 
         rating_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.rating_spin = Gtk.SpinButton.new_with_range(1, 10, 1)
@@ -469,6 +497,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         self._enable_drop(self.cover_image, self.on_cover_drop)
 
+    # Правая панель: изображения и видео.
     def _build_media(self) -> None:
         images_frame = Gtk.Frame(label="Изображения")
         images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -507,12 +536,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._enable_drop(self.images_list, self.on_images_drop)
         self._enable_drop(self.videos_list, self.on_videos_drop)
 
+    # Утилита для строки "метка + виджет".
     def _row(self, label: str, widget: Gtk.Widget) -> Gtk.Widget:
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         row.pack_start(Gtk.Label(label=label, xalign=0), False, False, 0)
         row.pack_start(widget, True, True, 0)
         return row
 
+    # Утилита для секций с заголовком.
     def _section(self, title: str, widget: Gtk.Widget) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         label = Gtk.Label(label=title)
@@ -521,11 +552,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         box.pack_start(widget, True, True, 0)
         return box
 
+    # Включаем drag-and-drop для виджета.
     def _enable_drop(self, widget: Gtk.Widget, handler) -> None:
         target = Gtk.TargetEntry.new("text/uri-list", 0, 0)
         widget.drag_dest_set(Gtk.DestDefaults.ALL, [target], Gdk.DragAction.COPY)
         widget.connect("drag-data-received", handler)
 
+    # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
         for row in self.title_list.get_children():
             self.title_list.remove(row)
@@ -548,6 +581,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.title_rows.append(title["id"])
         self.title_list.show_all()
 
+    # Обработчик выбора тайтла в списке.
     def on_title_selected(self, _listbox, row: Gtk.ListBoxRow) -> None:
         if not row:
             return
@@ -555,6 +589,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         title_id = self.title_rows[index]
         self.load_title(title_id)
 
+    # Загрузка данных тайтла в форму.
     def load_title(self, title_id: int) -> None:
         title = self.db.get_title(title_id)
         if not title:
@@ -590,6 +625,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._set_cover(self.cover_path)
         self.refresh_media_lists()
 
+    # Установка изображения обложки.
     def _set_cover(self, path: str) -> None:
         if path and os.path.exists(path):
             pixbuf = self._load_pixbuf(path)
@@ -598,6 +634,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 return
         self.cover_image.clear()
 
+    # Читаем файл в Pixbuf и масштабируем до 240px по большей стороне.
     def _load_pixbuf(self, path: str):
         try:
             pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
@@ -611,6 +648,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             )
         return pixbuf
 
+    # Добавить новый тайтл.
     def add_title(self) -> None:
         data = self.collect_form_data()
         if not data["main_title"]:
@@ -620,6 +658,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.refresh_titles()
         self.load_title(title_id)
 
+    # Сохранить изменения.
     def save_title(self) -> None:
         if not self.current_title_id:
             self._message("Нет тайтла", "Выберите тайтл в списке.")
@@ -628,6 +667,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.db.update_title(self.current_title_id, data)
         self.refresh_titles()
 
+    # Удалить выбранный тайтл.
     def delete_title(self) -> None:
         if not self.current_title_id:
             return
@@ -638,6 +678,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.refresh_titles()
         self.clear_form()
 
+    # Считать значения формы в словарь для сохранения.
     def collect_form_data(self) -> dict:
         status_data = {status: check.get_active() for status, check in self.status_checks.items()}
         return {
@@ -668,6 +709,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "cover_path": self.cover_path,
         }
 
+    # Очистить форму, если тайтл удалён или не выбран.
     def clear_form(self) -> None:
         self.main_title.set_text("")
         self.alt_titles.set_text("")
@@ -692,6 +734,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         for row in self.videos_list.get_children():
             self.videos_list.remove(row)
 
+    # Добавление тега через диалог.
     def add_tag(self) -> None:
         dialog = Gtk.Dialog(title="Тег", transient_for=self, modal=True)
         dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
@@ -714,6 +757,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         else:
             self.tags_entry.set_text(new_tag)
 
+    # Выбор обложки через файловый диалог.
     def pick_cover(self) -> None:
         dialog = Gtk.FileChooserDialog(
             title="Выберите изображение",
@@ -734,16 +778,19 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 self._set_cover(self.cover_path)
         dialog.destroy()
 
+    # Обработка drop для обложки.
     def on_cover_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         path = self._first_path_from_drop(data)
         if path:
             self.cover_path = path
             self._set_cover(path)
 
+    # Возвращает первый путь из drag-and-drop.
     def _first_path_from_drop(self, data: Gtk.SelectionData) -> str:
         paths = self._extract_paths(data)
         return paths[0] if paths else ""
 
+    # Преобразование URI из drop в локальные пути.
     def _extract_paths(self, data: Gtk.SelectionData) -> list:
         uris = data.get_uris()
         paths = []
@@ -754,6 +801,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 paths.append(path)
         return paths
 
+    # Перерисовка списков изображений и видео.
     def refresh_media_lists(self) -> None:
         for row in self.images_list.get_children():
             self.images_list.remove(row)
@@ -775,6 +823,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.images_list.show_all()
         self.videos_list.show_all()
 
+    # Добавление изображений к тайтлу.
     def add_image(self) -> None:
         if not self.current_title_id:
             self._message("Нет тайтла", "Сначала выберите тайтл.")
@@ -784,6 +833,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.add_media(self.current_title_id, "image", path, "")
         self.refresh_media_lists()
 
+    # Добавление видео с автоматическим чтением MediaInfo.
     def add_video(self) -> None:
         if not self.current_title_id:
             self._message("Нет тайтла", "Сначала выберите тайтл.")
@@ -794,6 +844,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.add_media(self.current_title_id, "video", path, info)
         self.refresh_media_lists()
 
+    # Обработка drop для списка изображений.
     def on_images_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         if not self.current_title_id:
             return
@@ -801,6 +852,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.add_media(self.current_title_id, "image", path, "")
         self.refresh_media_lists()
 
+    # Обработка drop для списка видео.
     def on_videos_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         if not self.current_title_id:
             return
@@ -809,6 +861,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.add_media(self.current_title_id, "video", path, info)
         self.refresh_media_lists()
 
+    # Диалог выбора нескольких файлов.
     def _pick_files(self, title: str, mime_types: list) -> list:
         dialog = Gtk.FileChooserDialog(
             title=title, transient_for=self, action=Gtk.FileChooserAction.OPEN
@@ -827,6 +880,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         return paths
 
+    # Универсальное инфо-сообщение.
     def _message(self, title: str, body: str) -> None:
         dialog = Gtk.MessageDialog(
             transient_for=self,
@@ -839,6 +893,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.run()
         dialog.destroy()
 
+    # Диалог подтверждения.
     def _confirm(self, title: str, body: str) -> bool:
         dialog = Gtk.MessageDialog(
             transient_for=self,
@@ -853,16 +908,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
         return response == Gtk.ResponseType.YES
 
 
+# Приложение GTK.
 class HSorterApp(Gtk.Application):
+    # Создание приложения и БД.
     def __init__(self) -> None:
         super().__init__(application_id="com.example.hsorter")
         self.db = Database(os.path.join(os.path.dirname(__file__), "hsorter.sqlite"))
 
+    # Показываем главное окно.
     def do_activate(self) -> None:
         win = HSorterWindow(self, self.db)
         win.show_all()
 
 
+# Создание и запуск GTK приложения.
 def main() -> None:
     app = HSorterApp()
     app.run(None)
