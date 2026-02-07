@@ -1240,23 +1240,23 @@ class HSorterWindow(Gtk.ApplicationWindow):
         media_row = self._get_media_row(media_id)
         if not media_row:
             return
-        dialog = Gtk.Dialog(title="Детали видео", transient_for=self, modal=True)
+        dialog = Gtk.Dialog(
+            title=f"Детали {os.path.basename(media_path)}", transient_for=self, modal=True
+        )
         dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
         dialog.set_default_size(900, 700)
         content = dialog.get_content_area()
         content.set_spacing(8)
 
-        # Полный путь и кнопка открытия каталога.
-        path_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        path_entry = Gtk.Entry()
-        path_entry.set_text(media_path)
-        path_entry.set_editable(False)
-        open_dir = Gtk.Button(label="Открыть каталог")
-        open_dir.connect("clicked", lambda _b: self._open_folder(media_path))
-        path_row.pack_start(Gtk.Label(label="Путь", xalign=0), False, False, 0)
-        path_row.pack_start(path_entry, True, True, 0)
-        path_row.pack_start(open_dir, False, False, 0)
-        content.pack_start(path_row, False, False, 0)
+        # Верхняя зона: миниатюра слева, путь и свойства по центру, изображения справа.
+        top_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        left_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        center_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        right_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        top_row.pack_start(left_column, False, False, 0)
+        top_row.pack_start(center_column, True, True, 0)
+        top_row.pack_start(right_column, True, True, 0)
+        content.pack_start(top_row, True, True, 0)
 
         # Миниатюра видео и кнопки управления.
         thumb_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -1281,7 +1281,19 @@ class HSorterWindow(Gtk.ApplicationWindow):
         thumb_box.pack_start(thumb_label, False, False, 0)
         thumb_box.pack_start(thumb_event, False, False, 0)
         thumb_box.pack_start(thumb_buttons, False, False, 0)
-        content.pack_start(thumb_box, False, False, 0)
+        left_column.pack_start(thumb_box, False, False, 0)
+
+        # Полный путь и кнопка открытия каталога.
+        path_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        path_entry = Gtk.Entry()
+        path_entry.set_text(media_path)
+        path_entry.set_editable(False)
+        open_dir = Gtk.Button(label="Открыть каталог")
+        open_dir.connect("clicked", lambda _b: self._open_folder(media_path))
+        path_row.pack_start(Gtk.Label(label="Путь", xalign=0), False, False, 0)
+        path_row.pack_start(path_entry, True, True, 0)
+        path_row.pack_start(open_dir, False, False, 0)
+        center_column.pack_start(path_row, False, False, 0)
 
         def set_thumbnail(path_value: str) -> None:
             nonlocal thumb_path
@@ -1350,29 +1362,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         tracks_scroller = Gtk.ScrolledWindow()
         tracks_scroller.set_vexpand(True)
+        tracks_scroller.set_size_request(-1, 260)
         tracks_scroller.add(tracks_view)
         tracks_box.pack_start(tracks_scroller, True, True, 0)
-        content.pack_start(tracks_frame, True, True, 0)
+        center_column.pack_start(tracks_frame, True, True, 0)
 
         self._populate_tracks_store(tracks_store, media_id, media_path)
-
-        # Пользовательский комментарий.
-        comment_frame = Gtk.Frame(label="Комментарий")
-        comment_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        comment_box.set_margin_top(6)
-        comment_box.set_margin_bottom(6)
-        comment_box.set_margin_start(6)
-        comment_box.set_margin_end(6)
-        comment_frame.add(comment_box)
-        comment_buffer = Gtk.TextBuffer()
-        comment_buffer.set_text(media_row["comment"] or "")
-        comment_view = Gtk.TextView(buffer=comment_buffer)
-        comment_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        comment_scroller = Gtk.ScrolledWindow()
-        comment_scroller.set_vexpand(True)
-        comment_scroller.add(comment_view)
-        comment_box.pack_start(comment_scroller, True, True, 0)
-        content.pack_start(comment_frame, True, True, 0)
 
         # Список изображений видеофайла.
         video_images_frame = Gtk.Frame(label="Изображения видеофайла")
@@ -1416,9 +1411,28 @@ class HSorterWindow(Gtk.ApplicationWindow):
             lambda _b: self._add_video_image(media_id, video_images_store),
         )
         video_images_box.pack_start(add_video_image, False, False, 0)
-        content.pack_start(video_images_frame, True, True, 0)
+        right_column.pack_start(video_images_frame, True, True, 0)
 
         self._refresh_video_images(media_id, video_images_store)
+
+        # Пользовательский комментарий.
+        comment_frame = Gtk.Frame(label="Комментарий")
+        comment_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        comment_box.set_margin_top(6)
+        comment_box.set_margin_bottom(6)
+        comment_box.set_margin_start(6)
+        comment_box.set_margin_end(6)
+        comment_frame.add(comment_box)
+        comment_buffer = Gtk.TextBuffer()
+        comment_buffer.set_text(media_row["comment"] or "")
+        comment_view = Gtk.TextView(buffer=comment_buffer)
+        comment_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        comment_scroller = Gtk.ScrolledWindow()
+        comment_scroller.set_vexpand(True)
+        comment_scroller.set_size_request(-1, 140)
+        comment_scroller.add(comment_view)
+        comment_box.pack_start(comment_scroller, True, True, 0)
+        content.pack_start(comment_frame, False, False, 0)
 
         dialog.show_all()
         dialog.run()
@@ -1502,6 +1516,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             resolution = ""
             if track.get("width") and track.get("height"):
                 resolution = f"{track.get('width')}x{track.get('height')}"
+            encoding_value = track.get("encoding", "") if track_type == "Text" else ""
             store.append(
                 [
                     track_type,
@@ -1512,7 +1527,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
                     str(track.get("bit_rate", "")),
                     int(track_index),
                     track.get("codec_id", ""),
-                    track.get("encoding", ""),
+                    encoding_value,
                     hardsub,
                     hardsub_lang,
                 ]
