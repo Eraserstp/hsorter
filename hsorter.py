@@ -74,11 +74,20 @@ class Database:
                 media_type TEXT NOT NULL,
                 path TEXT NOT NULL,
                 info TEXT DEFAULT "",
+                sort_order INTEGER DEFAULT 0,
                 FOREIGN KEY(title_id) REFERENCES titles(id) ON DELETE CASCADE
             )
             """
         )
+        if not self._column_exists("media", "sort_order"):
+            cur.execute("ALTER TABLE media ADD COLUMN sort_order INTEGER DEFAULT 0")
         self.conn.commit()
+
+    # Проверяем наличие колонки в таблице.
+    def _column_exists(self, table: str, column: str) -> bool:
+        cur = self.conn.cursor()
+        columns = cur.execute(f"PRAGMA table_info({table})").fetchall()
+        return any(col["name"] == column for col in columns)
 
     # Получение списка тайтлов с фильтрами по названию, тегам и статусам.
     def list_titles(self, query: str = "", tags: str = "", status_filter: str = ""):
@@ -211,18 +220,41 @@ class Database:
     def list_media(self, title_id: int, media_type: str):
         cur = self.conn.cursor()
         return cur.execute(
-            "SELECT * FROM media WHERE title_id=? AND media_type=? ORDER BY id DESC",
+            "SELECT * FROM media WHERE title_id=? AND media_type=? ORDER BY sort_order, id",
             (title_id, media_type),
         ).fetchall()
 
     # Добавление медиафайла к тайтлу.
     def add_media(self, title_id: int, media_type: str, path: str, info: str) -> None:
         cur = self.conn.cursor()
+        sort_order = self._next_media_order(title_id, media_type)
         cur.execute(
-            "INSERT INTO media (title_id, media_type, path, info) VALUES (?,?,?,?)",
-            (title_id, media_type, path, info),
+            "INSERT INTO media (title_id, media_type, path, info, sort_order) VALUES (?,?,?,?,?)",
+            (title_id, media_type, path, info, sort_order),
         )
         self.conn.commit()
+
+    # Удаление медиафайла по id.
+    def delete_media(self, media_id: int) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM media WHERE id=?", (media_id,))
+        self.conn.commit()
+
+    # Обновление порядка медиафайлов.
+    def update_media_order(self, media_ids: list[int]) -> None:
+        cur = self.conn.cursor()
+        for order, media_id in enumerate(media_ids):
+            cur.execute("UPDATE media SET sort_order=? WHERE id=?", (order, media_id))
+        self.conn.commit()
+
+    # Следующий номер сортировки для нового медиа.
+    def _next_media_order(self, title_id: int, media_type: str) -> int:
+        cur = self.conn.cursor()
+        row = cur.execute(
+            "SELECT MAX(sort_order) AS max_order FROM media WHERE title_id=? AND media_type=?",
+            (title_id, media_type),
+        ).fetchone()
+        return (row["max_order"] or 0) + 1
 
 
 # Извлечение информации о видео через pymediainfo или CLI mediainfo.
@@ -509,14 +541,17 @@ class HSorterWindow(Gtk.ApplicationWindow):
         images_box.set_margin_end(6)
         images_frame.add(images_box)
         # Список изображений в виде миниатюр (thumbnails).
-        self.images_store = Gtk.ListStore(GdkPixbuf.Pixbuf, str)
+        self.images_store = Gtk.ListStore(GdkPixbuf.Pixbuf, str, int)
         self.images_view = Gtk.IconView.new()
         self.images_view.set_model(self.images_store)
         self.images_view.set_pixbuf_column(0)
         self.images_view.set_margin(6)
         self.images_view.set_item_padding(6)
-        self.images_view.set_columns(3)
+        self.images_view.set_columns(1)
+        self.images_view.set_reorderable(True)
         self.images_view.connect("item-activated", self.on_image_activated)
+        self.images_view.connect("button-press-event", self.on_images_menu)
+        self.images_store.connect("rows-reordered", self.on_images_reordered)
         images_scroller = Gtk.ScrolledWindow()
         images_scroller.set_vexpand(True)
         images_scroller.add(self.images_view)
@@ -533,10 +568,18 @@ class HSorterWindow(Gtk.ApplicationWindow):
         videos_box.set_margin_start(6)
         videos_box.set_margin_end(6)
         videos_frame.add(videos_box)
-        self.videos_list = Gtk.ListBox()
+        # Список видеофайлов с поддержкой сортировки и контекстного меню.
+        self.videos_store = Gtk.ListStore(str, str, int)
+        self.videos_view = Gtk.TreeView(model=self.videos_store)
+        renderer = Gtk.CellRendererText()
+        column = Gtk.TreeViewColumn("Видео", renderer, text=0)
+        self.videos_view.append_column(column)
+        self.videos_view.set_reorderable(True)
+        self.videos_view.connect("button-press-event", self.on_videos_menu)
+        self.videos_store.connect("rows-reordered", self.on_videos_reordered)
         videos_scroller = Gtk.ScrolledWindow()
         videos_scroller.set_vexpand(True)
-        videos_scroller.add(self.videos_list)
+        videos_scroller.add(self.videos_view)
         videos_box.pack_start(videos_scroller, True, True, 0)
         add_video = Gtk.Button(label="Добавить файл")
         add_video.connect("clicked", lambda _b: self.add_video())
@@ -544,7 +587,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.media_box.pack_start(videos_frame, True, True, 0)
 
         self._enable_drop(self.images_view, self.on_images_drop)
-        self._enable_drop(self.videos_list, self.on_videos_drop)
+        self._enable_drop(self.videos_view, self.on_videos_drop)
 
     # Утилита для строки "метка + виджет".
     def _row(self, label: str, widget: Gtk.Widget) -> Gtk.Widget:
@@ -754,8 +797,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.cover_path = ""
         self.cover_image.clear()
         self.images_store.clear()
-        for row in self.videos_list.get_children():
-            self.videos_list.remove(row)
+        self.videos_store.clear()
 
     # Добавление тега через диалог.
     def add_tag(self) -> None:
@@ -827,23 +869,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
     # Перерисовка списков изображений и видео.
     def refresh_media_lists(self) -> None:
         self.images_store.clear()
-        for row in self.videos_list.get_children():
-            self.videos_list.remove(row)
+        self.videos_store.clear()
         if not self.current_title_id:
             return
         for item in self.db.list_media(self.current_title_id, "image"):
             pixbuf = self._load_thumbnail(item["path"])
             if pixbuf:
-                self.images_store.append([pixbuf, item["path"]])
+                self.images_store.append([pixbuf, item["path"], item["id"]])
         for item in self.db.list_media(self.current_title_id, "video"):
             text = os.path.basename(item["path"])
             if item["info"]:
                 text += f"\n  {item['info']}"
-            row = Gtk.ListBoxRow()
-            row.add(Gtk.Label(label=text, xalign=0))
-            self.videos_list.add(row)
+            self.videos_store.append([text, item["path"], item["id"]])
         self.images_view.show_all()
-        self.videos_list.show_all()
+        self.videos_view.show_all()
 
     # Добавление изображений к тайтлу.
     def add_image(self) -> None:
@@ -882,6 +921,37 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if path:
             Gio.AppInfo.launch_default_for_uri(f"file://{path}", None)
 
+    # Контекстное меню для удаления изображения.
+    def on_images_menu(self, _view, event) -> bool:
+        if event.button != 3:
+            return False
+        path = self.images_view.get_path_at_pos(int(event.x), int(event.y))
+        if not path:
+            return False
+        self.images_view.select_path(path)
+        menu = Gtk.Menu()
+        delete_item = Gtk.MenuItem(label="Удалить")
+        delete_item.connect("activate", lambda _i: self._delete_selected_image())
+        menu.append(delete_item)
+        menu.show_all()
+        menu.popup(None, None, None, None, event.button, event.time)
+        return True
+
+    # Удаление выбранного изображения из БД и списка.
+    def _delete_selected_image(self) -> None:
+        paths = self.images_view.get_selected_items()
+        if not paths:
+            return
+        tree_iter = self.images_store.get_iter(paths[0])
+        media_id = self.images_store.get_value(tree_iter, 2)
+        if media_id:
+            self.db.delete_media(media_id)
+            self.refresh_media_lists()
+
+    # Сохранение порядка изображений после drag-and-drop.
+    def on_images_reordered(self, _model, _path, _iter, _new_order) -> None:
+        self._persist_media_order(self.images_store)
+
     # Обработка drop для списка видео.
     def on_videos_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         if not self.current_title_id:
@@ -890,6 +960,44 @@ class HSorterWindow(Gtk.ApplicationWindow):
             info = MediaInfo.describe_video(path)
             self.db.add_media(self.current_title_id, "video", path, info)
         self.refresh_media_lists()
+
+    # Контекстное меню для удаления видео.
+    def on_videos_menu(self, view, event) -> bool:
+        if event.button != 3:
+            return False
+        path_info = view.get_path_at_pos(int(event.x), int(event.y))
+        if not path_info:
+            return False
+        path, _column, _cell_x, _cell_y = path_info
+        view.get_selection().select_path(path)
+        menu = Gtk.Menu()
+        delete_item = Gtk.MenuItem(label="Удалить")
+        delete_item.connect("activate", lambda _i: self._delete_selected_video())
+        menu.append(delete_item)
+        menu.show_all()
+        menu.popup(None, None, None, None, event.button, event.time)
+        return True
+
+    # Удаление выбранного видео из БД и списка.
+    def _delete_selected_video(self) -> None:
+        selection = self.videos_view.get_selection()
+        model, tree_iter = selection.get_selected()
+        if not tree_iter:
+            return
+        media_id = model.get_value(tree_iter, 2)
+        if media_id:
+            self.db.delete_media(media_id)
+            self.refresh_media_lists()
+
+    # Сохранение порядка видео после drag-and-drop.
+    def on_videos_reordered(self, _model, _path, _iter, _new_order) -> None:
+        self._persist_media_order(self.videos_store)
+
+    # Универсальный способ сохранить порядок по текущей модели.
+    def _persist_media_order(self, model: Gtk.ListStore) -> None:
+        media_ids = [row[2] for row in model if row[2] is not None]
+        if media_ids:
+            self.db.update_media_order(media_ids)
 
     # Диалог выбора нескольких файлов.
     def _pick_files(self, title: str, mime_types: list) -> list:
