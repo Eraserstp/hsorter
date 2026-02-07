@@ -508,10 +508,18 @@ class HSorterWindow(Gtk.ApplicationWindow):
         images_box.set_margin_start(6)
         images_box.set_margin_end(6)
         images_frame.add(images_box)
-        self.images_list = Gtk.ListBox()
+        # Список изображений в виде миниатюр (thumbnails).
+        self.images_store = Gtk.ListStore(GdkPixbuf.Pixbuf, str)
+        self.images_view = Gtk.IconView.new()
+        self.images_view.set_model(self.images_store)
+        self.images_view.set_pixbuf_column(0)
+        self.images_view.set_margin(6)
+        self.images_view.set_item_padding(6)
+        self.images_view.set_columns(3)
+        self.images_view.connect("item-activated", self.on_image_activated)
         images_scroller = Gtk.ScrolledWindow()
         images_scroller.set_vexpand(True)
-        images_scroller.add(self.images_list)
+        images_scroller.add(self.images_view)
         images_box.pack_start(images_scroller, True, True, 0)
         add_image = Gtk.Button(label="Добавить файл")
         add_image.connect("clicked", lambda _b: self.add_image())
@@ -535,7 +543,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         videos_box.pack_start(add_video, False, False, 0)
         self.media_box.pack_start(videos_frame, True, True, 0)
 
-        self._enable_drop(self.images_list, self.on_images_drop)
+        self._enable_drop(self.images_view, self.on_images_drop)
         self._enable_drop(self.videos_list, self.on_videos_drop)
 
     # Утилита для строки "метка + виджет".
@@ -650,6 +658,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
             )
         return pixbuf
 
+    # Создаём миниатюру для списка изображений (обрезаем по большей стороне до 160px).
+    def _load_thumbnail(self, path: str):
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
+        except Exception:
+            return None
+        width, height = pixbuf.get_width(), pixbuf.get_height()
+        scale = min(160 / width, 160 / height, 1)
+        if scale < 1:
+            pixbuf = pixbuf.scale_simple(
+                int(width * scale), int(height * scale), GdkPixbuf.InterpType.BILINEAR
+            )
+        return pixbuf
+
     # Добавить новый тайтл.
     def add_title(self) -> None:
         data = self.collect_form_data()
@@ -731,8 +753,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.tags_entry.set_text("")
         self.cover_path = ""
         self.cover_image.clear()
-        for row in self.images_list.get_children():
-            self.images_list.remove(row)
+        self.images_store.clear()
         for row in self.videos_list.get_children():
             self.videos_list.remove(row)
 
@@ -805,16 +826,15 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Перерисовка списков изображений и видео.
     def refresh_media_lists(self) -> None:
-        for row in self.images_list.get_children():
-            self.images_list.remove(row)
+        self.images_store.clear()
         for row in self.videos_list.get_children():
             self.videos_list.remove(row)
         if not self.current_title_id:
             return
         for item in self.db.list_media(self.current_title_id, "image"):
-            row = Gtk.ListBoxRow()
-            row.add(Gtk.Label(label=os.path.basename(item["path"]), xalign=0))
-            self.images_list.add(row)
+            pixbuf = self._load_thumbnail(item["path"])
+            if pixbuf:
+                self.images_store.append([pixbuf, item["path"]])
         for item in self.db.list_media(self.current_title_id, "video"):
             text = os.path.basename(item["path"])
             if item["info"]:
@@ -822,7 +842,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             row = Gtk.ListBoxRow()
             row.add(Gtk.Label(label=text, xalign=0))
             self.videos_list.add(row)
-        self.images_list.show_all()
+        self.images_view.show_all()
         self.videos_list.show_all()
 
     # Добавление изображений к тайтлу.
@@ -853,6 +873,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
         for path in self._extract_paths(data):
             self.db.add_media(self.current_title_id, "image", path, "")
         self.refresh_media_lists()
+
+    # Открыть изображение по клику на миниатюре.
+    def on_image_activated(self, _view, tree_path) -> None:
+        model = self.images_store
+        tree_iter = model.get_iter(tree_path)
+        path = model.get_value(tree_iter, 1)
+        if path:
+            Gio.AppInfo.launch_default_for_uri(f"file://{path}", None)
 
     # Обработка drop для списка видео.
     def on_videos_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
