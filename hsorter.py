@@ -247,6 +247,21 @@ class Database:
         cur.execute("DELETE FROM titles WHERE id=?", (title_id,))
         self.conn.commit()
 
+    # Проверка наличия тайтла с таким названием (исключая текущий id при редактировании).
+    def title_exists(self, name: str, exclude_id: int | None = None) -> bool:
+        cur = self.conn.cursor()
+        if exclude_id:
+            row = cur.execute(
+                "SELECT 1 FROM titles WHERE main_title=? AND id<>? LIMIT 1",
+                (name, exclude_id),
+            ).fetchone()
+        else:
+            row = cur.execute(
+                "SELECT 1 FROM titles WHERE main_title=? LIMIT 1",
+                (name,),
+            ).fetchone()
+        return row is not None
+
     # Список медиафайлов по типу (image/video).
     def list_media(self, title_id: int, media_type: str):
         cur = self.conn.cursor()
@@ -536,6 +551,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.db = db
         self.current_title_id = None
         self.cover_path = ""
+        self.new_title_mode = False
 
         self._build_ui()
         self.refresh_titles()
@@ -622,8 +638,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         title_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.main_title = Gtk.Entry()
+        self.main_title.connect("changed", self.on_main_title_changed)
         self.alt_titles = Gtk.Entry()
         title_column.pack_start(self._row("Основное название", self.main_title), False, False, 0)
+        self.name_warning_label = Gtk.Label(label="")
+        self.name_warning_label.set_xalign(0)
+        title_column.pack_start(self.name_warning_label, False, False, 0)
         title_column.pack_start(
             self._row("Дополнительные названия", self.alt_titles), False, False, 0
         )
@@ -722,9 +742,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         tags_row.pack_start(add_tag, False, False, 0)
         self.details_box.pack_start(self._section("Теги", tags_row), False, False, 0)
 
-        save_button = Gtk.Button(label="Сохранить изменения")
-        save_button.connect("clicked", lambda _b: self.save_title())
-        self.details_box.pack_start(save_button, False, False, 0)
+        self.save_button = Gtk.Button(label="Сохранить изменения")
+        self.save_button.connect("clicked", lambda _b: self.save_title())
+        self.save_button.set_sensitive(False)
+        self.details_box.pack_start(self.save_button, False, False, 0)
 
         self._enable_drop(self.cover_image, self.on_cover_drop)
 
@@ -848,6 +869,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not title:
             return
         self.current_title_id = title_id
+        self.new_title_mode = False
         self.cover_path = title["cover_path"] or ""
         self.main_title.set_text(title["main_title"])
         self.alt_titles.set_text(title["alt_titles"])
@@ -877,6 +899,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             check.set_active(bool(status_data.get(status)))
         self._set_cover(self.cover_path)
         self.refresh_media_lists()
+        self._update_save_state()
 
     # Установка изображения обложки.
     def _set_cover(self, path: str) -> None:
@@ -917,22 +940,28 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Добавить новый тайтл.
     def add_title(self) -> None:
-        data = self.collect_form_data()
-        if not data["main_title"]:
-            self._message("Нужно название", "Введите основное название тайтла.")
-            return
-        title_id = self.db.add_title(data)
-        self.refresh_titles()
-        self.load_title(title_id)
+        self.new_title_mode = True
+        self.current_title_id = None
+        self.clear_form()
+        self.main_title.grab_focus()
+        self._update_save_state()
 
     # Сохранить изменения.
     def save_title(self) -> None:
-        if not self.current_title_id:
-            self._message("Нет тайтла", "Выберите тайтл в списке.")
+        if not self._update_save_state():
             return
         data = self.collect_form_data()
-        self.db.update_title(self.current_title_id, data)
-        self.refresh_titles()
+        if self.new_title_mode:
+            title_id = self.db.add_title(data)
+            self.new_title_mode = False
+            self.refresh_titles()
+            self.load_title(title_id)
+        else:
+            if not self.current_title_id:
+                self._message("Нет тайтла", "Выберите тайтл в списке.")
+                return
+            self.db.update_title(self.current_title_id, data)
+            self.refresh_titles()
 
     # Удалить выбранный тайтл.
     def delete_title(self) -> None:
@@ -998,6 +1027,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.cover_image.clear()
         self.images_store.clear()
         self.videos_store.clear()
+        self.name_warning_label.set_text("")
+        self.save_button.set_sensitive(False)
 
     # Добавление тега через диалог.
     def add_tag(self) -> None:
@@ -1215,6 +1246,28 @@ class HSorterWindow(Gtk.ApplicationWindow):
         media_ids = [row[2] for row in model if row[2] is not None]
         if media_ids:
             self.db.update_media_order(media_ids)
+
+    # Реакция на изменение основного названия тайтла.
+    def on_main_title_changed(self, _entry) -> None:
+        self._update_save_state()
+
+    # Обновляем доступность кнопки сохранения и сообщение об ошибке.
+    def _update_save_state(self) -> bool:
+        name = self.main_title.get_text().strip()
+        if not name:
+            self.save_button.set_sensitive(False)
+            self.name_warning_label.set_text("")
+            return False
+        duplicate = self.db.title_exists(name, exclude_id=self.current_title_id)
+        if duplicate:
+            self.save_button.set_sensitive(False)
+            self.name_warning_label.set_markup(
+                "<span foreground='red'>Название уже существует.</span>"
+            )
+            return False
+        self.name_warning_label.set_text("")
+        self.save_button.set_sensitive(True)
+        return True
 
     # Диалог выбора нескольких файлов.
     def _pick_files(self, title: str, mime_types: list) -> list:
