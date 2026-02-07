@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -577,33 +578,18 @@ class HSorterApp(tk.Tk):
 
     def _set_cover(self, path: str) -> None:
         if path and os.path.exists(path):
-            image = self._load_cover_image(path)
-            if image is None:
+            try:
+                from PIL import Image, ImageTk
+            except Exception:
                 self.cover_label.configure(text=os.path.basename(path))
                 return
-            self.cover_image = image
+            image = Image.open(path)
+            image.thumbnail((240, 240))
+            self.cover_image = ImageTk.PhotoImage(image)
             self.cover_label.configure(image=self.cover_image, text="")
         else:
             self.cover_image = None
             self.cover_label.configure(image="", text="Перетащите изображение\nили нажмите")
-
-    def _load_cover_image(self, path: str):
-        try:
-            image = tk.PhotoImage(file=path)
-            image = image.subsample(max(1, image.width() // 240), max(1, image.height() // 240))
-            return image
-        except Exception:
-            pass
-        try:
-            from PIL import Image, ImageTk
-        except Exception:
-            return None
-        try:
-            image = Image.open(path)
-        except Exception:
-            return None
-        image.thumbnail((240, 240))
-        return ImageTk.PhotoImage(image)
 
     def add_title(self) -> None:
         data = self.collect_form_data()
