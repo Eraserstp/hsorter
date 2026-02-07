@@ -453,6 +453,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
             check = Gtk.CheckButton(label=status)
             self.status_checks[status] = check
             status_box.pack_start(check, False, False, 0)
+        status_popover.show_all()
+        status_popover.hide()
         self.status_button.set_popover(status_popover)
         self.details_box.pack_start(self._row("Статус", self.status_button), False, False, 0)
 
