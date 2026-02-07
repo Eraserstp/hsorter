@@ -75,12 +75,43 @@ class Database:
                 path TEXT NOT NULL,
                 info TEXT DEFAULT "",
                 sort_order INTEGER DEFAULT 0,
+                thumbnail_path TEXT DEFAULT "",
+                comment TEXT DEFAULT "",
                 FOREIGN KEY(title_id) REFERENCES titles(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS video_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 0,
+                FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS video_track_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                media_id INTEGER NOT NULL,
+                track_type TEXT NOT NULL,
+                track_index INTEGER NOT NULL,
+                language TEXT DEFAULT "",
+                hardsub INTEGER DEFAULT 0,
+                hardsub_language TEXT DEFAULT "",
+                FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE
             )
             """
         )
         if not self._column_exists("media", "sort_order"):
             cur.execute("ALTER TABLE media ADD COLUMN sort_order INTEGER DEFAULT 0")
+        if not self._column_exists("media", "thumbnail_path"):
+            cur.execute("ALTER TABLE media ADD COLUMN thumbnail_path TEXT DEFAULT ''")
+        if not self._column_exists("media", "comment"):
+            cur.execute("ALTER TABLE media ADD COLUMN comment TEXT DEFAULT ''")
         self.conn.commit()
 
     # Проверяем наличие колонки в таблице.
@@ -234,6 +265,15 @@ class Database:
         )
         self.conn.commit()
 
+    # Обновление миниатюры и комментария для видео.
+    def update_media_details(self, media_id: int, thumbnail_path: str, comment: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE media SET thumbnail_path=?, comment=? WHERE id=?",
+            (thumbnail_path, comment, media_id),
+        )
+        self.conn.commit()
+
     # Удаление медиафайла по id.
     def delete_media(self, media_id: int) -> None:
         cur = self.conn.cursor()
@@ -255,6 +295,91 @@ class Database:
             (title_id, media_type),
         ).fetchone()
         return (row["max_order"] or 0) + 1
+
+    # Список изображений, привязанных к видеофайлу.
+    def list_video_images(self, media_id: int):
+        cur = self.conn.cursor()
+        return cur.execute(
+            "SELECT * FROM video_images WHERE media_id=? ORDER BY sort_order, id",
+            (media_id,),
+        ).fetchall()
+
+    # Добавить изображение к видеофайлу.
+    def add_video_image(self, media_id: int, path: str) -> None:
+        cur = self.conn.cursor()
+        sort_order = self._next_video_image_order(media_id)
+        cur.execute(
+            "INSERT INTO video_images (media_id, path, sort_order) VALUES (?,?,?)",
+            (media_id, path, sort_order),
+        )
+        self.conn.commit()
+
+    # Удалить изображение видеофайла.
+    def delete_video_image(self, image_id: int) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM video_images WHERE id=?", (image_id,))
+        self.conn.commit()
+
+    # Обновить порядок изображений видеофайла.
+    def update_video_image_order(self, image_ids: list[int]) -> None:
+        cur = self.conn.cursor()
+        for order, image_id in enumerate(image_ids):
+            cur.execute("UPDATE video_images SET sort_order=? WHERE id=?", (order, image_id))
+        self.conn.commit()
+
+    # Следующий порядок для изображения видео.
+    def _next_video_image_order(self, media_id: int) -> int:
+        cur = self.conn.cursor()
+        row = cur.execute(
+            "SELECT MAX(sort_order) AS max_order FROM video_images WHERE media_id=?",
+            (media_id,),
+        ).fetchone()
+        return (row["max_order"] or 0) + 1
+
+    # Получение/обновление ручных корректировок для дорожек.
+    def list_track_overrides(self, media_id: int):
+        cur = self.conn.cursor()
+        return cur.execute(
+            "SELECT * FROM video_track_overrides WHERE media_id=?",
+            (media_id,),
+        ).fetchall()
+
+    def upsert_track_override(
+        self,
+        media_id: int,
+        track_type: str,
+        track_index: int,
+        language: str,
+        hardsub: bool,
+        hardsub_language: str,
+    ) -> None:
+        cur = self.conn.cursor()
+        row = cur.execute(
+            """
+            SELECT id FROM video_track_overrides
+            WHERE media_id=? AND track_type=? AND track_index=?
+            """,
+            (media_id, track_type, track_index),
+        ).fetchone()
+        if row:
+            cur.execute(
+                """
+                UPDATE video_track_overrides
+                SET language=?, hardsub=?, hardsub_language=?
+                WHERE id=?
+                """,
+                (language, 1 if hardsub else 0, hardsub_language, row["id"]),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO video_track_overrides
+                (media_id, track_type, track_index, language, hardsub, hardsub_language)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (media_id, track_type, track_index, language, 1 if hardsub else 0, hardsub_language),
+            )
+        self.conn.commit()
 
 
 # Извлечение информации о видео через pymediainfo или CLI mediainfo.
@@ -329,6 +454,77 @@ class MediaInfo:
                     f"Субтитры: {track.get('Format', '')} {track.get('Language', '')}"
                 )
         return " | ".join([p.strip() for p in parts if p.strip()])
+
+    # Получаем подробную структуру из mediainfo в виде словаря.
+    @staticmethod
+    def get_details(path: str) -> dict:
+        data = MediaInfo._details_from_pymediainfo(path)
+        if data:
+            return data
+        return MediaInfo._details_from_cli(path)
+
+    @staticmethod
+    def _details_from_pymediainfo(path: str) -> dict:
+        try:
+            from pymediainfo import MediaInfo as PyMediaInfo
+        except Exception:
+            return {}
+        try:
+            media_info = PyMediaInfo.parse(path)
+        except Exception:
+            return {}
+        tracks = []
+        for idx, track in enumerate(media_info.tracks):
+            tracks.append(
+                {
+                    "index": idx,
+                    "type": track.track_type,
+                    "format": track.format or "",
+                    "width": track.width or "",
+                    "height": track.height or "",
+                    "bit_rate": track.bit_rate or "",
+                    "language": track.language or "",
+                    "title": getattr(track, "title", "") or "",
+                    "codec_id": getattr(track, "codec_id", "") or "",
+                    "encoding": getattr(track, "encoding_settings", "") or "",
+                }
+            )
+        return {"tracks": tracks}
+
+    @staticmethod
+    def _details_from_cli(path: str) -> dict:
+        try:
+            result = subprocess.run(
+                ["mediainfo", "--Output=JSON", path],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return {}
+        if result.returncode != 0:
+            return {}
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return {}
+        tracks = []
+        for idx, track in enumerate(data.get("media", {}).get("track", [])):
+            tracks.append(
+                {
+                    "index": idx,
+                    "type": track.get("@type", ""),
+                    "format": track.get("Format", ""),
+                    "width": track.get("Width", ""),
+                    "height": track.get("Height", ""),
+                    "bit_rate": track.get("BitRate", ""),
+                    "language": track.get("Language", ""),
+                    "title": track.get("Title", ""),
+                    "codec_id": track.get("CodecID", ""),
+                    "encoding": track.get("Encoded_Library_Settings", ""),
+                }
+            )
+        return {"tracks": tracks}
 
 
 # Главное окно приложения с тремя панелями.
@@ -578,6 +774,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.videos_view.append_column(column)
         self.videos_view.set_reorderable(True)
         self.videos_view.connect("button-press-event", self.on_videos_menu)
+        self.videos_view.connect("row-activated", self.on_video_activated)
         self.videos_store.connect("rows-reordered", self.on_videos_reordered)
         self.videos_view.connect("drag-end", self.on_videos_drag_end)
         self.videos_scroller = Gtk.ScrolledWindow()
@@ -968,6 +1165,15 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.add_media(self.current_title_id, "video", path, info)
         self.refresh_media_lists()
 
+    # Открытие модального окна с подробностями видео.
+    def on_video_activated(self, _view, path, _column) -> None:
+        tree_iter = self.videos_store.get_iter(path)
+        media_path = self.videos_store.get_value(tree_iter, 1)
+        media_id = self.videos_store.get_value(tree_iter, 2)
+        if not media_id:
+            return
+        self._open_video_details_dialog(media_id, media_path)
+
     # Контекстное меню для удаления видео.
     def on_videos_menu(self, view, event) -> bool:
         if event.button != 3:
@@ -1028,6 +1234,394 @@ class HSorterWindow(Gtk.ApplicationWindow):
                     paths.append(filename)
         dialog.destroy()
         return paths
+
+    # Открыть диалог подробной информации о видеофайле.
+    def _open_video_details_dialog(self, media_id: int, media_path: str) -> None:
+        media_row = self._get_media_row(media_id)
+        if not media_row:
+            return
+        dialog = Gtk.Dialog(title="Детали видео", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        dialog.set_default_size(900, 700)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+
+        # Полный путь и кнопка открытия каталога.
+        path_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        path_entry = Gtk.Entry()
+        path_entry.set_text(media_path)
+        path_entry.set_editable(False)
+        open_dir = Gtk.Button(label="Открыть каталог")
+        open_dir.connect("clicked", lambda _b: self._open_folder(media_path))
+        path_row.pack_start(Gtk.Label(label="Путь", xalign=0), False, False, 0)
+        path_row.pack_start(path_entry, True, True, 0)
+        path_row.pack_start(open_dir, False, False, 0)
+        content.pack_start(path_row, False, False, 0)
+
+        # Миниатюра видео и кнопки управления.
+        thumb_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        thumb_label = Gtk.Label(label="Миниатюра")
+        thumb_label.set_xalign(0)
+        thumb_image = Gtk.Image()
+        thumb_image.set_size_request(350, 260)
+        thumb_event = Gtk.EventBox()
+        thumb_event.add(thumb_image)
+        thumb_path = media_row["thumbnail_path"] or ""
+        if thumb_path and os.path.exists(thumb_path):
+            thumb_image.set_from_pixbuf(self._load_pixbuf(thumb_path))
+        thumb_event.connect(
+            "button-press-event",
+            lambda _w, _e: self._open_default_if_exists(thumb_path),
+        )
+        thumb_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        load_thumb = Gtk.Button(label="Загрузить миниатюру")
+        gen_thumb = Gtk.Button(label="Сгенерировать")
+        thumb_buttons.pack_start(load_thumb, False, False, 0)
+        thumb_buttons.pack_start(gen_thumb, False, False, 0)
+        thumb_box.pack_start(thumb_label, False, False, 0)
+        thumb_box.pack_start(thumb_event, False, False, 0)
+        thumb_box.pack_start(thumb_buttons, False, False, 0)
+        content.pack_start(thumb_box, False, False, 0)
+
+        def set_thumbnail(path_value: str) -> None:
+            nonlocal thumb_path
+            thumb_path = path_value
+            if thumb_path and os.path.exists(thumb_path):
+                thumb_image.set_from_pixbuf(self._load_pixbuf(thumb_path))
+
+        load_thumb.connect(
+            "clicked",
+            lambda _b: self._pick_thumbnail_for_video(set_thumbnail),
+        )
+        gen_thumb.connect(
+            "clicked",
+            lambda _b: self._generate_video_thumbnail(media_path, set_thumbnail),
+        )
+
+        # Детальная информация по дорожкам.
+        tracks_frame = Gtk.Frame(label="Дорожки и свойства")
+        tracks_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        tracks_box.set_margin_top(6)
+        tracks_box.set_margin_bottom(6)
+        tracks_box.set_margin_start(6)
+        tracks_box.set_margin_end(6)
+        tracks_frame.add(tracks_box)
+        tracks_store = Gtk.ListStore(str, str, str, str, str, str, int, str, str, bool, str)
+        tracks_view = Gtk.TreeView(model=tracks_store)
+        columns = [
+            ("Тип", 0),
+            ("Название", 1),
+            ("Язык", 2),
+            ("Формат", 3),
+            ("Разрешение", 4),
+            ("Битрейт", 5),
+            ("CodecID", 7),
+            ("Кодировка", 8),
+        ]
+        for title, idx in columns:
+            renderer = Gtk.CellRendererText()
+            if idx == 2:
+                renderer.set_property("editable", True)
+                renderer.connect(
+                    "edited",
+                    lambda _r, path_str, new_text: self._on_track_language_edit(
+                        tracks_store, path_str, new_text, media_id
+                    ),
+                )
+            column = Gtk.TreeViewColumn(title, renderer, text=idx)
+            tracks_view.append_column(column)
+        hardsub_renderer = Gtk.CellRendererToggle()
+        hardsub_renderer.connect(
+            "toggled",
+            lambda _r, path_str: self._on_track_hardsub_toggle(
+                tracks_store, path_str, media_id
+            ),
+        )
+        tracks_view.append_column(Gtk.TreeViewColumn("Хардсаб", hardsub_renderer, active=9))
+        hs_lang_renderer = Gtk.CellRendererText()
+        hs_lang_renderer.set_property("editable", True)
+        hs_lang_renderer.connect(
+            "edited",
+            lambda _r, path_str, new_text: self._on_track_hardsub_lang_edit(
+                tracks_store, path_str, new_text, media_id
+            ),
+        )
+        tracks_view.append_column(Gtk.TreeViewColumn("Язык хардсаба", hs_lang_renderer, text=10))
+
+        tracks_scroller = Gtk.ScrolledWindow()
+        tracks_scroller.set_vexpand(True)
+        tracks_scroller.add(tracks_view)
+        tracks_box.pack_start(tracks_scroller, True, True, 0)
+        content.pack_start(tracks_frame, True, True, 0)
+
+        self._populate_tracks_store(tracks_store, media_id, media_path)
+
+        # Пользовательский комментарий.
+        comment_frame = Gtk.Frame(label="Комментарий")
+        comment_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        comment_box.set_margin_top(6)
+        comment_box.set_margin_bottom(6)
+        comment_box.set_margin_start(6)
+        comment_box.set_margin_end(6)
+        comment_frame.add(comment_box)
+        comment_buffer = Gtk.TextBuffer()
+        comment_buffer.set_text(media_row["comment"] or "")
+        comment_view = Gtk.TextView(buffer=comment_buffer)
+        comment_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        comment_scroller = Gtk.ScrolledWindow()
+        comment_scroller.set_vexpand(True)
+        comment_scroller.add(comment_view)
+        comment_box.pack_start(comment_scroller, True, True, 0)
+        content.pack_start(comment_frame, True, True, 0)
+
+        # Список изображений видеофайла.
+        video_images_frame = Gtk.Frame(label="Изображения видеофайла")
+        video_images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        video_images_box.set_margin_top(6)
+        video_images_box.set_margin_bottom(6)
+        video_images_box.set_margin_start(6)
+        video_images_box.set_margin_end(6)
+        video_images_frame.add(video_images_box)
+        video_images_store = Gtk.ListStore(GdkPixbuf.Pixbuf, str, int)
+        video_images_view = Gtk.IconView.new()
+        video_images_view.set_model(video_images_store)
+        video_images_view.set_pixbuf_column(0)
+        video_images_view.set_columns(1)
+        video_images_view.set_reorderable(True)
+        video_images_view.connect(
+            "item-activated",
+            lambda _v, tree_path: self._open_default_for_store_path(
+                video_images_store, tree_path
+            ),
+        )
+        video_images_view.connect(
+            "button-press-event",
+            lambda _v, event: self._video_images_menu(
+                event, video_images_view, video_images_store, media_id
+            ),
+        )
+        video_images_store.connect(
+            "rows-reordered",
+            lambda _m, _p, _i, _n: self._persist_video_image_order(
+                video_images_store, media_id
+            ),
+        )
+        images_scroller = Gtk.ScrolledWindow()
+        images_scroller.set_vexpand(True)
+        images_scroller.add(video_images_view)
+        video_images_box.pack_start(images_scroller, True, True, 0)
+        add_video_image = Gtk.Button(label="Добавить изображение")
+        add_video_image.connect(
+            "clicked",
+            lambda _b: self._add_video_image(media_id, video_images_store),
+        )
+        video_images_box.pack_start(add_video_image, False, False, 0)
+        content.pack_start(video_images_frame, True, True, 0)
+
+        self._refresh_video_images(media_id, video_images_store)
+
+        dialog.show_all()
+        dialog.run()
+        self.db.update_media_details(
+            media_id,
+            thumb_path,
+            comment_buffer.get_text(
+                comment_buffer.get_start_iter(),
+                comment_buffer.get_end_iter(),
+                True,
+            ).strip(),
+        )
+        dialog.destroy()
+
+    def _get_media_row(self, media_id: int):
+        cur = self.db.conn.cursor()
+        return cur.execute("SELECT * FROM media WHERE id=?", (media_id,)).fetchone()
+
+    def _open_folder(self, path_value: str) -> None:
+        folder = os.path.dirname(path_value)
+        Gio.AppInfo.launch_default_for_uri(f"file://{folder}", None)
+
+    def _open_default_if_exists(self, path_value: str) -> None:
+        if path_value and os.path.exists(path_value):
+            Gio.AppInfo.launch_default_for_uri(f"file://{path_value}", None)
+
+    def _open_default_for_store_path(self, store: Gtk.ListStore, tree_path) -> None:
+        tree_iter = store.get_iter(tree_path)
+        path_value = store.get_value(tree_iter, 1)
+        self._open_default_if_exists(path_value)
+
+    def _pick_thumbnail_for_video(self, callback) -> None:
+        dialog = Gtk.FileChooserDialog(
+            title="Выберите изображение миниатюры",
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
+        )
+        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Выбрать", Gtk.ResponseType.OK)
+        filter_images = Gtk.FileFilter()
+        for mime in ("image/png", "image/jpeg", "image/bmp", "image/gif"):
+            filter_images.add_mime_type(mime)
+        dialog.add_filter(filter_images)
+        if dialog.run() == Gtk.ResponseType.OK:
+            filename = dialog.get_filename()
+            if filename:
+                callback(filename)
+        dialog.destroy()
+
+    def _generate_video_thumbnail(self, video_path: str, callback) -> None:
+        cache_dir = os.path.join(os.path.dirname(__file__), ".hsorter_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        output_path = os.path.join(
+            cache_dir, f"thumb_{abs(hash(video_path)) % 100000}.jpg"
+        )
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-vf",
+            "fps=1/10,scale=350:260,tile=4x5",
+            "-frames:v",
+            "1",
+            output_path,
+        ]
+        subprocess.run(cmd, check=False)
+        if os.path.exists(output_path):
+            callback(output_path)
+
+    def _populate_tracks_store(self, store: Gtk.ListStore, media_id: int, path: str) -> None:
+        store.clear()
+        details = MediaInfo.get_details(path)
+        overrides = self._track_overrides_map(media_id)
+        for track in details.get("tracks", []):
+            track_type = track.get("type", "")
+            track_index = track.get("index", 0)
+            override = overrides.get((track_type, track_index), {})
+            language = override.get("language") or track.get("language", "")
+            hardsub = bool(override.get("hardsub", False))
+            hardsub_lang = override.get("hardsub_language", "")
+            resolution = ""
+            if track.get("width") and track.get("height"):
+                resolution = f"{track.get('width')}x{track.get('height')}"
+            store.append(
+                [
+                    track_type,
+                    track.get("title", ""),
+                    language,
+                    track.get("format", ""),
+                    resolution,
+                    str(track.get("bit_rate", "")),
+                    int(track_index),
+                    track.get("codec_id", ""),
+                    track.get("encoding", ""),
+                    hardsub,
+                    hardsub_lang,
+                ]
+            )
+
+    def _track_overrides_map(self, media_id: int) -> dict:
+        overrides = {}
+        for row in self.db.list_track_overrides(media_id):
+            overrides[(row["track_type"], row["track_index"])] = {
+                "language": row["language"],
+                "hardsub": bool(row["hardsub"]),
+                "hardsub_language": row["hardsub_language"],
+            }
+        return overrides
+
+    def _on_track_language_edit(
+        self, store: Gtk.ListStore, path_str: str, new_text: str, media_id: int
+    ) -> None:
+        tree_iter = store.get_iter(path_str)
+        store.set_value(tree_iter, 2, new_text)
+        track_type = store.get_value(tree_iter, 0)
+        track_index = store.get_value(tree_iter, 6)
+        hardsub = store.get_value(tree_iter, 9)
+        hardsub_lang = store.get_value(tree_iter, 10)
+        self.db.upsert_track_override(
+            media_id, track_type, track_index, new_text, hardsub, hardsub_lang
+        )
+
+    def _on_track_hardsub_toggle(
+        self, store: Gtk.ListStore, path_str: str, media_id: int
+    ) -> None:
+        tree_iter = store.get_iter(path_str)
+        current = store.get_value(tree_iter, 9)
+        store.set_value(tree_iter, 9, not current)
+        track_type = store.get_value(tree_iter, 0)
+        track_index = store.get_value(tree_iter, 6)
+        language = store.get_value(tree_iter, 2)
+        hardsub_lang = store.get_value(tree_iter, 10)
+        self.db.upsert_track_override(
+            media_id, track_type, track_index, language, not current, hardsub_lang
+        )
+
+    def _on_track_hardsub_lang_edit(
+        self, store: Gtk.ListStore, path_str: str, new_text: str, media_id: int
+    ) -> None:
+        tree_iter = store.get_iter(path_str)
+        store.set_value(tree_iter, 10, new_text)
+        track_type = store.get_value(tree_iter, 0)
+        track_index = store.get_value(tree_iter, 6)
+        language = store.get_value(tree_iter, 2)
+        hardsub = store.get_value(tree_iter, 9)
+        self.db.upsert_track_override(
+            media_id, track_type, track_index, language, hardsub, new_text
+        )
+
+    def _refresh_video_images(self, media_id: int, store: Gtk.ListStore) -> None:
+        store.clear()
+        for item in self.db.list_video_images(media_id):
+            pixbuf = self._load_thumbnail(item["path"])
+            if pixbuf:
+                store.append([pixbuf, item["path"], item["id"]])
+
+    def _add_video_image(self, media_id: int, store: Gtk.ListStore) -> None:
+        paths = self._pick_files(
+            "Выберите изображения", ["image/png", "image/jpeg", "image/bmp"]
+        )
+        for path in paths:
+            self.db.add_video_image(media_id, path)
+        self._refresh_video_images(media_id, store)
+
+    def _video_images_menu(
+        self,
+        event,
+        view: Gtk.IconView,
+        store: Gtk.ListStore,
+        media_id: int,
+    ) -> bool:
+        if event.button != 3:
+            return False
+        path = view.get_path_at_pos(int(event.x), int(event.y))
+        if not path:
+            return False
+        view.select_path(path)
+        menu = Gtk.Menu()
+        delete_item = Gtk.MenuItem(label="Удалить")
+        delete_item.connect(
+            "activate", lambda _i: self._delete_video_image(view, store, media_id)
+        )
+        menu.append(delete_item)
+        menu.show_all()
+        menu.popup(None, None, None, None, event.button, event.time)
+        return True
+
+    def _delete_video_image(
+        self, view: Gtk.IconView, store: Gtk.ListStore, media_id: int
+    ) -> None:
+        paths = view.get_selected_items()
+        if not paths:
+            return
+        tree_iter = store.get_iter(paths[0])
+        image_id = store.get_value(tree_iter, 2)
+        if image_id:
+            self.db.delete_video_image(image_id)
+            self._refresh_video_images(media_id, store)
+
+    def _persist_video_image_order(self, store: Gtk.ListStore, media_id: int) -> None:
+        image_ids = [row[2] for row in store if row[2] is not None]
+        if image_ids:
+            self.db.update_video_image_order(image_ids)
 
     # Универсальное инфо-сообщение.
     def _message(self, title: str, body: str) -> None:
