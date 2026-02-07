@@ -6,7 +6,9 @@ import subprocess
 
 import gi
 
+# Требуем конкретные версии GTK/GDK для корректной работы
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, Gtk
 
 
