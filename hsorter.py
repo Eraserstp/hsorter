@@ -3,9 +3,11 @@ import json
 import os
 import sqlite3
 import subprocess
-import sys
-import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, Gtk
 
 
 STATUS_OPTIONS = [
@@ -280,180 +282,162 @@ class MediaInfo:
         return " | ".join([p.strip() for p in parts if p.strip()])
 
 
-class HSorterApp(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("HSorter")
-        self.geometry("1400x900")
-        self.db = Database(os.path.join(os.path.dirname(__file__), "hsorter.sqlite"))
+class HSorterWindow(Gtk.ApplicationWindow):
+    def __init__(self, app: Gtk.Application, db: Database) -> None:
+        super().__init__(application=app, title="HSorter")
+        self.set_default_size(1400, 900)
+        self.db = db
         self.current_title_id = None
-        self.show_status_var = tk.BooleanVar(value=True)
-        self.filter_name_var = tk.StringVar()
-        self.filter_tags_var = tk.StringVar()
-        self.filter_status_var = tk.StringVar()
-        self.cover_image = None
-        self._init_ui()
+        self.cover_path = ""
+
+        self._build_ui()
         self.refresh_titles()
 
-    def _init_ui(self) -> None:
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
-        main_pane = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_pane.grid(row=0, column=0, sticky="nsew")
+    def _build_ui(self) -> None:
+        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        root.set_margin_top(10)
+        root.set_margin_bottom(10)
+        root.set_margin_start(10)
+        root.set_margin_end(10)
+        self.add(root)
 
-        self.library_frame = ttk.Frame(main_pane, padding=10)
-        self.details_frame = ttk.Frame(main_pane, padding=10)
-        self.media_frame = ttk.Frame(main_pane, padding=10)
+        self.library_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.media_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
-        main_pane.add(self.library_frame, weight=1)
-        main_pane.add(self.details_frame, weight=2)
-        main_pane.add(self.media_frame, weight=1)
+        root.pack_start(self.library_box, True, True, 0)
+        root.pack_start(self.details_box, True, True, 0)
+        root.pack_start(self.media_box, True, True, 0)
 
         self._build_library()
         self._build_details()
         self._build_media()
 
     def _build_library(self) -> None:
-        filter_box = ttk.LabelFrame(self.library_frame, text="Фильтр")
-        filter_box.pack(fill=tk.X)
-        ttk.Label(filter_box, text="Название").grid(row=0, column=0, sticky="w")
-        ttk.Entry(filter_box, textvariable=self.filter_name_var).grid(
-            row=0, column=1, sticky="ew", padx=4
-        )
-        ttk.Label(filter_box, text="Теги").grid(row=1, column=0, sticky="w")
-        ttk.Entry(filter_box, textvariable=self.filter_tags_var).grid(
-            row=1, column=1, sticky="ew", padx=4
-        )
-        ttk.Label(filter_box, text="Статус").grid(row=2, column=0, sticky="w")
-        ttk.Entry(filter_box, textvariable=self.filter_status_var).grid(
-            row=2, column=1, sticky="ew", padx=4
-        )
-        ttk.Button(filter_box, text="Применить", command=self.refresh_titles).grid(
-            row=3, column=0, columnspan=2, pady=4
-        )
-        filter_box.columnconfigure(1, weight=1)
+        filter_frame = Gtk.Frame(label="Фильтр")
+        filter_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        filter_box.set_margin_top(6)
+        filter_box.set_margin_bottom(6)
+        filter_box.set_margin_start(6)
+        filter_box.set_margin_end(6)
+        filter_frame.add(filter_box)
 
-        list_frame = ttk.Frame(self.library_frame)
-        list_frame.pack(fill=tk.BOTH, expand=True, pady=8)
-        self.title_list = tk.Listbox(list_frame, height=20)
-        self.title_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.title_list.bind("<<ListboxSelect>>", self.on_title_select)
-        scroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.title_list.yview)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.title_list.configure(yscrollcommand=scroll.set)
+        self.filter_name = Gtk.Entry()
+        self.filter_tags = Gtk.Entry()
+        self.filter_status = Gtk.Entry()
+        filter_box.pack_start(self._row("Название", self.filter_name), False, False, 0)
+        filter_box.pack_start(self._row("Теги", self.filter_tags), False, False, 0)
+        filter_box.pack_start(self._row("Статус", self.filter_status), False, False, 0)
+        apply_button = Gtk.Button(label="Применить")
+        apply_button.connect("clicked", lambda _b: self.refresh_titles())
+        filter_box.pack_start(apply_button, False, False, 0)
+        self.library_box.pack_start(filter_frame, False, False, 0)
 
-        self.show_status_check = ttk.Checkbutton(
-            self.library_frame,
-            text="Показать статусы",
-            variable=self.show_status_var,
-            command=self.refresh_titles,
-        )
-        self.show_status_check.pack(anchor="w", pady=4)
+        self.title_list = Gtk.ListBox()
+        self.title_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        self.title_list.connect("row-selected", self.on_title_selected)
+        list_scroller = Gtk.ScrolledWindow()
+        list_scroller.set_vexpand(True)
+        list_scroller.add(self.title_list)
+        self.library_box.pack_start(list_scroller, True, True, 0)
 
-        button_row = ttk.Frame(self.library_frame)
-        button_row.pack(fill=tk.X, pady=4)
-        ttk.Button(button_row, text="Добавить", command=self.add_title).pack(
-            side=tk.LEFT
-        )
-        ttk.Button(button_row, text="Удалить", command=self.delete_title).pack(
-            side=tk.LEFT, padx=4
-        )
+        self.show_status = Gtk.CheckButton(label="Показать статусы")
+        self.show_status.set_active(True)
+        self.show_status.connect("toggled", lambda _b: self.refresh_titles())
+        self.library_box.pack_start(self.show_status, False, False, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        add_button = Gtk.Button(label="Добавить")
+        add_button.connect("clicked", lambda _b: self.add_title())
+        delete_button = Gtk.Button(label="Удалить")
+        delete_button.connect("clicked", lambda _b: self.delete_title())
+        buttons.pack_start(add_button, False, False, 0)
+        buttons.pack_start(delete_button, False, False, 0)
+        self.library_box.pack_start(buttons, False, False, 0)
 
     def _build_details(self) -> None:
-        self.details_frame.columnconfigure(1, weight=1)
-        title_label = ttk.Label(self.details_frame, text="Карточка тайтла")
-        title_label.grid(row=0, column=0, columnspan=2, sticky="w")
+        header = Gtk.Label(label="Карточка тайтла")
+        header.set_xalign(0)
+        self.details_box.pack_start(header, False, False, 0)
 
-        self.cover_label = ttk.Label(
-            self.details_frame,
-            text="Перетащите изображение\nили нажмите",
-            relief=tk.RIDGE,
-            width=30,
-            padding=6,
-        )
-        self.cover_label.grid(row=1, column=0, rowspan=4, sticky="n")
-        self.cover_label.bind("<Button-1>", lambda _e: self.pick_cover())
+        cover_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.cover_image = Gtk.Image()
+        self.cover_image.set_size_request(240, 240)
+        self.cover_button = Gtk.Button(label="Загрузить изображение")
+        self.cover_button.connect("clicked", lambda _b: self.pick_cover())
+        cover_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        cover_column.pack_start(self.cover_image, False, False, 0)
+        cover_column.pack_start(self.cover_button, False, False, 0)
+        cover_row.pack_start(cover_column, False, False, 0)
 
-        self._enable_dnd(self.cover_label, self.on_cover_drop)
+        title_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.main_title = Gtk.Entry()
+        self.alt_titles = Gtk.Entry()
+        title_column.pack_start(self._row("Основное название", self.main_title), False, False, 0)
+        title_column.pack_start(
+            self._row("Дополнительные названия", self.alt_titles), False, False, 0
+        )
+        cover_row.pack_start(title_column, True, True, 0)
 
-        self.main_title_var = tk.StringVar()
-        ttk.Label(self.details_frame, text="Основное название").grid(
-            row=1, column=1, sticky="w"
-        )
-        ttk.Entry(self.details_frame, textvariable=self.main_title_var).grid(
-            row=2, column=1, sticky="ew"
-        )
-        self.alt_titles_var = tk.StringVar()
-        ttk.Label(self.details_frame, text="Дополнительные названия").grid(
-            row=3, column=1, sticky="w"
-        )
-        ttk.Entry(self.details_frame, textvariable=self.alt_titles_var).grid(
-            row=4, column=1, sticky="ew"
-        )
+        self.details_box.pack_start(cover_row, False, False, 0)
 
-        status_frame = ttk.LabelFrame(self.details_frame, text="Статус")
-        status_frame.grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
-        self.status_vars = {}
+        status_frame = Gtk.Frame(label="Статус")
+        status_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+        status_grid.set_margin_top(6)
+        status_grid.set_margin_bottom(6)
+        status_grid.set_margin_start(6)
+        status_grid.set_margin_end(6)
+        status_frame.add(status_grid)
+        self.status_checks = {}
         for idx, status in enumerate(STATUS_OPTIONS):
-            var = tk.BooleanVar(value=False)
-            self.status_vars[status] = var
-            chk = ttk.Checkbutton(status_frame, text=status, variable=var)
-            chk.grid(row=idx // 3, column=idx % 3, sticky="w", padx=4, pady=2)
+            check = Gtk.CheckButton(label=status)
+            self.status_checks[status] = check
+            status_grid.attach(check, idx % 3, idx // 3, 1, 1)
+        self.details_box.pack_start(status_frame, False, False, 0)
 
-        rating_frame = ttk.Frame(self.details_frame)
-        rating_frame.grid(row=6, column=0, columnspan=2, sticky="ew")
-        rating_frame.columnconfigure(1, weight=1)
-        rating_frame.columnconfigure(3, weight=1)
-        ttk.Label(rating_frame, text="Рейтинг").grid(row=0, column=0, sticky="w")
-        self.rating_var = tk.IntVar(value=1)
-        ttk.Spinbox(rating_frame, from_=1, to=10, textvariable=self.rating_var).grid(
-            row=0, column=1, sticky="ew"
+        rating_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.rating_spin = Gtk.SpinButton.new_with_range(1, 10, 1)
+        self.personal_rating_spin = Gtk.SpinButton.new_with_range(1, 10, 1)
+        self.censored_check = Gtk.CheckButton(label="Цензура")
+        rating_row.pack_start(self._row("Рейтинг", self.rating_spin), True, True, 0)
+        rating_row.pack_start(
+            self._row("Личный рейтинг", self.personal_rating_spin), True, True, 0
         )
-        ttk.Label(rating_frame, text="Личный рейтинг").grid(
-            row=0, column=2, sticky="w", padx=6
-        )
-        self.personal_rating_var = tk.IntVar(value=1)
-        ttk.Spinbox(
-            rating_frame, from_=1, to=10, textvariable=self.personal_rating_var
-        ).grid(row=0, column=3, sticky="ew")
-        self.censored_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(rating_frame, text="Цензура", variable=self.censored_var).grid(
-            row=0, column=4, padx=6
-        )
+        rating_row.pack_start(self.censored_check, False, False, 0)
+        self.details_box.pack_start(rating_row, False, False, 0)
 
-        year_frame = ttk.Frame(self.details_frame)
-        year_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=4)
+        year_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         current_year = datetime.date.today().year
-        ttk.Label(year_frame, text="Год начала").grid(row=0, column=0, sticky="w")
-        self.year_start_var = tk.IntVar(value=current_year)
-        ttk.Entry(year_frame, textvariable=self.year_start_var, width=8).grid(
-            row=0, column=1, sticky="w"
-        )
-        ttk.Label(year_frame, text="Год окончания").grid(row=0, column=2, sticky="w")
-        self.year_end_var = tk.IntVar(value=current_year)
-        ttk.Entry(year_frame, textvariable=self.year_end_var, width=8).grid(
-            row=0, column=3, sticky="w"
-        )
-        ttk.Label(year_frame, text="Эпизоды").grid(row=0, column=4, sticky="w")
-        self.episodes_var = tk.IntVar(value=0)
-        ttk.Entry(year_frame, textvariable=self.episodes_var, width=6).grid(
-            row=0, column=5, sticky="w"
-        )
-        ttk.Label(year_frame, text="Длительность").grid(row=0, column=6, sticky="w")
-        self.duration_var = tk.StringVar()
-        ttk.Entry(year_frame, textvariable=self.duration_var, width=10).grid(
-            row=0, column=7, sticky="w"
+        self.year_start = Gtk.SpinButton.new_with_range(1900, current_year + 5, 1)
+        self.year_end = Gtk.SpinButton.new_with_range(1900, current_year + 5, 1)
+        self.year_start.set_value(current_year)
+        self.year_end.set_value(current_year)
+        self.episodes_spin = Gtk.SpinButton.new_with_range(0, 10000, 1)
+        self.duration_entry = Gtk.Entry()
+        year_row.pack_start(self._row("Год начала", self.year_start), True, True, 0)
+        year_row.pack_start(self._row("Год окончания", self.year_end), True, True, 0)
+        year_row.pack_start(self._row("Эпизоды", self.episodes_spin), True, True, 0)
+        year_row.pack_start(self._row("Длительность", self.duration_entry), True, True, 0)
+        self.details_box.pack_start(year_row, False, False, 0)
+
+        self.description_buffer = Gtk.TextBuffer()
+        description_view = Gtk.TextView(buffer=self.description_buffer)
+        description_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        description_scroller = Gtk.ScrolledWindow()
+        description_scroller.set_vexpand(True)
+        description_scroller.add(description_view)
+        self.details_box.pack_start(
+            self._section("Краткое описание", description_scroller), True, True, 0
         )
 
-        ttk.Label(self.details_frame, text="Краткое описание").grid(
-            row=8, column=0, columnspan=2, sticky="w"
-        )
-        self.description_text = tk.Text(self.details_frame, height=4)
-        self.description_text.grid(row=9, column=0, columnspan=2, sticky="ew")
-
-        info_frame = ttk.Frame(self.details_frame)
-        info_frame.grid(row=10, column=0, columnspan=2, sticky="ew", pady=6)
-        info_frame.columnconfigure(1, weight=1)
+        info_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+        info_grid.set_margin_top(6)
+        info_grid.set_margin_bottom(6)
+        info_grid.set_margin_start(6)
+        info_grid.set_margin_end(6)
+        info_frame = Gtk.Frame(label="Сведения")
+        info_frame.add(info_grid)
+        self.info_entries = {}
         labels = [
             "Страна",
             "Производство",
@@ -464,80 +448,111 @@ class HSorterApp(tk.Tk):
             "Автор субтитров",
             "Автор озвучки",
         ]
-        self.info_vars = []
         for idx, label in enumerate(labels):
-            row = idx
-            ttk.Label(info_frame, text=label).grid(row=row, column=0, sticky="w")
-            var = tk.StringVar()
-            self.info_vars.append(var)
-            ttk.Entry(info_frame, textvariable=var).grid(row=row, column=1, sticky="ew")
+            entry = Gtk.Entry()
+            self.info_entries[label] = entry
+            info_grid.attach(Gtk.Label(label=label, xalign=0), 0, idx, 1, 1)
+            info_grid.attach(entry, 1, idx, 1, 1)
+        self.details_box.pack_start(info_frame, False, False, 0)
 
-        tag_frame = ttk.Frame(self.details_frame)
-        tag_frame.grid(row=11, column=0, columnspan=2, sticky="ew", pady=4)
-        tag_frame.columnconfigure(0, weight=1)
-        self.tags_var = tk.StringVar()
-        ttk.Entry(tag_frame, textvariable=self.tags_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(tag_frame, text="Добавить тег", command=self.add_tag).grid(
-            row=0, column=1, padx=4
-        )
+        tags_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.tags_entry = Gtk.Entry()
+        add_tag = Gtk.Button(label="Добавить тег")
+        add_tag.connect("clicked", lambda _b: self.add_tag())
+        tags_row.pack_start(self.tags_entry, True, True, 0)
+        tags_row.pack_start(add_tag, False, False, 0)
+        self.details_box.pack_start(self._section("Теги", tags_row), False, False, 0)
 
-        ttk.Button(
-            self.details_frame, text="Сохранить изменения", command=self.save_title
-        ).grid(row=12, column=0, columnspan=2, pady=6)
+        save_button = Gtk.Button(label="Сохранить изменения")
+        save_button.connect("clicked", lambda _b: self.save_title())
+        self.details_box.pack_start(save_button, False, False, 0)
+
+        self._enable_drop(self.cover_image, self.on_cover_drop)
 
     def _build_media(self) -> None:
-        images_frame = ttk.LabelFrame(self.media_frame, text="Изображения")
-        images_frame.pack(fill=tk.BOTH, expand=True, pady=6)
-        self.images_list = tk.Listbox(images_frame, height=10)
-        self.images_list.pack(fill=tk.BOTH, expand=True)
-        self._enable_dnd(self.images_list, self.on_images_drop)
-        ttk.Button(images_frame, text="Добавить файл", command=self.add_image).pack(
-            pady=4
-        )
+        images_frame = Gtk.Frame(label="Изображения")
+        images_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        images_box.set_margin_top(6)
+        images_box.set_margin_bottom(6)
+        images_box.set_margin_start(6)
+        images_box.set_margin_end(6)
+        images_frame.add(images_box)
+        self.images_list = Gtk.ListBox()
+        images_scroller = Gtk.ScrolledWindow()
+        images_scroller.set_vexpand(True)
+        images_scroller.add(self.images_list)
+        images_box.pack_start(images_scroller, True, True, 0)
+        add_image = Gtk.Button(label="Добавить файл")
+        add_image.connect("clicked", lambda _b: self.add_image())
+        images_box.pack_start(add_image, False, False, 0)
+        self.media_box.pack_start(images_frame, True, True, 0)
 
-        videos_frame = ttk.LabelFrame(self.media_frame, text="Видео")
-        videos_frame.pack(fill=tk.BOTH, expand=True, pady=6)
-        self.videos_list = tk.Listbox(videos_frame, height=10)
-        self.videos_list.pack(fill=tk.BOTH, expand=True)
-        self._enable_dnd(self.videos_list, self.on_videos_drop)
-        ttk.Button(videos_frame, text="Добавить файл", command=self.add_video).pack(
-            pady=4
-        )
+        videos_frame = Gtk.Frame(label="Видео")
+        videos_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        videos_box.set_margin_top(6)
+        videos_box.set_margin_bottom(6)
+        videos_box.set_margin_start(6)
+        videos_box.set_margin_end(6)
+        videos_frame.add(videos_box)
+        self.videos_list = Gtk.ListBox()
+        videos_scroller = Gtk.ScrolledWindow()
+        videos_scroller.set_vexpand(True)
+        videos_scroller.add(self.videos_list)
+        videos_box.pack_start(videos_scroller, True, True, 0)
+        add_video = Gtk.Button(label="Добавить файл")
+        add_video.connect("clicked", lambda _b: self.add_video())
+        videos_box.pack_start(add_video, False, False, 0)
+        self.media_box.pack_start(videos_frame, True, True, 0)
 
-    def _enable_dnd(self, widget: tk.Widget, handler) -> None:
-        try:
-            import tkinterdnd2 as tkdnd
-        except Exception:
-            return
-        try:
-            widget.drop_target_register(tkdnd.DND_FILES)
-            widget.dnd_bind("<<Drop>>", handler)
-        except Exception:
-            return
+        self._enable_drop(self.images_list, self.on_images_drop)
+        self._enable_drop(self.videos_list, self.on_videos_drop)
+
+    def _row(self, label: str, widget: Gtk.Widget) -> Gtk.Widget:
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        row.pack_start(Gtk.Label(label=label, xalign=0), False, False, 0)
+        row.pack_start(widget, True, True, 0)
+        return row
+
+    def _section(self, title: str, widget: Gtk.Widget) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        label = Gtk.Label(label=title)
+        label.set_xalign(0)
+        box.pack_start(label, False, False, 0)
+        box.pack_start(widget, True, True, 0)
+        return box
+
+    def _enable_drop(self, widget: Gtk.Widget, handler) -> None:
+        target = Gtk.TargetEntry.new("text/uri-list", 0, 0)
+        widget.drag_dest_set(Gtk.DestDefaults.ALL, [target], Gdk.DragAction.COPY)
+        widget.connect("drag-data-received", handler)
 
     def refresh_titles(self) -> None:
-        self.title_list.delete(0, tk.END)
+        for row in self.title_list.get_children():
+            self.title_list.remove(row)
         titles = self.db.list_titles(
-            query=self.filter_name_var.get().strip(),
-            tags=self.filter_tags_var.get().strip(),
-            status_filter=self.filter_status_var.get().strip(),
+            query=self.filter_name.get_text().strip(),
+            tags=self.filter_tags.get_text().strip(),
+            status_filter=self.filter_status.get_text().strip(),
         )
+        self.title_rows = []
         for title in titles:
             display = title["main_title"]
-            if self.show_status_var.get():
+            if self.show_status.get_active():
                 status_data = json.loads(title["status_json"] or "{}")
                 enabled = [s for s, v in status_data.items() if v]
                 if enabled:
                     display += f"\n  {'; '.join(enabled)}"
-            self.title_list.insert(tk.END, display)
-        self.title_list_titles = [title["id"] for title in titles]
+            row = Gtk.ListBoxRow()
+            row.add(Gtk.Label(label=display, xalign=0))
+            self.title_list.add(row)
+            self.title_rows.append(title["id"])
+        self.title_list.show_all()
 
-    def on_title_select(self, _event=None) -> None:
-        selection = self.title_list.curselection()
-        if not selection:
+    def on_title_selected(self, _listbox, row: Gtk.ListBoxRow) -> None:
+        if not row:
             return
-        index = selection[0]
-        title_id = self.title_list_titles[index]
+        index = row.get_index()
+        title_id = self.title_rows[index]
         self.load_title(title_id)
 
     def load_title(self, title_id: int) -> None:
@@ -546,55 +561,60 @@ class HSorterApp(tk.Tk):
             return
         self.current_title_id = title_id
         self.cover_path = title["cover_path"] or ""
-        self.main_title_var.set(title["main_title"])
-        self.alt_titles_var.set(title["alt_titles"])
-        self.rating_var.set(title["rating"])
-        self.personal_rating_var.set(title["personal_rating"])
-        self.censored_var.set(bool(title["censored"]))
-        self.year_start_var.set(title["year_start"] or datetime.date.today().year)
-        self.year_end_var.set(title["year_end"] or datetime.date.today().year)
-        self.episodes_var.set(title["episodes"] or 0)
-        self.duration_var.set(title["total_duration"])
-        self.description_text.delete("1.0", tk.END)
-        self.description_text.insert("1.0", title["description"])
-        info_values = [
-            title["country"],
-            title["production"],
-            title["director"],
-            title["character_designer"],
-            title["author"],
-            title["composer"],
-            title["subtitles_author"],
-            title["voice_author"],
-        ]
-        for var, value in zip(self.info_vars, info_values):
-            var.set(value)
-        self.tags_var.set(title["tags"])
+        self.main_title.set_text(title["main_title"])
+        self.alt_titles.set_text(title["alt_titles"])
+        self.rating_spin.set_value(title["rating"])
+        self.personal_rating_spin.set_value(title["personal_rating"])
+        self.censored_check.set_active(bool(title["censored"]))
+        self.year_start.set_value(title["year_start"] or datetime.date.today().year)
+        self.year_end.set_value(title["year_end"] or datetime.date.today().year)
+        self.episodes_spin.set_value(title["episodes"] or 0)
+        self.duration_entry.set_text(title["total_duration"])
+        self.description_buffer.set_text(title["description"] or "")
+        info_map = {
+            "Страна": title["country"],
+            "Производство": title["production"],
+            "Режиссёр": title["director"],
+            "Дизайнер персонажей": title["character_designer"],
+            "Автор сценария/оригинала": title["author"],
+            "Композитор": title["composer"],
+            "Автор субтитров": title["subtitles_author"],
+            "Автор озвучки": title["voice_author"],
+        }
+        for key, entry in self.info_entries.items():
+            entry.set_text(info_map.get(key, ""))
+        self.tags_entry.set_text(title["tags"])
         status_data = json.loads(title["status_json"] or "{}")
-        for status, var in self.status_vars.items():
-            var.set(bool(status_data.get(status)))
+        for status, check in self.status_checks.items():
+            check.set_active(bool(status_data.get(status)))
         self._set_cover(self.cover_path)
         self.refresh_media_lists()
 
     def _set_cover(self, path: str) -> None:
         if path and os.path.exists(path):
-            try:
-                from PIL import Image, ImageTk
-            except Exception:
-                self.cover_label.configure(text=os.path.basename(path))
+            pixbuf = self._load_pixbuf(path)
+            if pixbuf:
+                self.cover_image.set_from_pixbuf(pixbuf)
                 return
-            image = Image.open(path)
-            image.thumbnail((240, 240))
-            self.cover_image = ImageTk.PhotoImage(image)
-            self.cover_label.configure(image=self.cover_image, text="")
-        else:
-            self.cover_image = None
-            self.cover_label.configure(image="", text="Перетащите изображение\nили нажмите")
+        self.cover_image.clear()
+
+    def _load_pixbuf(self, path: str):
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
+        except Exception:
+            return None
+        width, height = pixbuf.get_width(), pixbuf.get_height()
+        scale = min(240 / width, 240 / height, 1)
+        if scale < 1:
+            pixbuf = pixbuf.scale_simple(
+                int(width * scale), int(height * scale), GdkPixbuf.InterpType.BILINEAR
+            )
+        return pixbuf
 
     def add_title(self) -> None:
         data = self.collect_form_data()
         if not data["main_title"]:
-            messagebox.showwarning("Нужно название", "Введите основное название тайтла.")
+            self._message("Нужно название", "Введите основное название тайтла.")
             return
         title_id = self.db.add_title(data)
         self.refresh_titles()
@@ -602,7 +622,7 @@ class HSorterApp(tk.Tk):
 
     def save_title(self) -> None:
         if not self.current_title_id:
-            messagebox.showwarning("Нет тайтла", "Выберите тайтл в списке.")
+            self._message("Нет тайтла", "Выберите тайтл в списке.")
             return
         data = self.collect_form_data()
         self.db.update_title(self.current_title_id, data)
@@ -611,7 +631,7 @@ class HSorterApp(tk.Tk):
     def delete_title(self) -> None:
         if not self.current_title_id:
             return
-        if not messagebox.askyesno("Удалить", "Удалить выбранный тайтл?"):
+        if not self._confirm("Удалить", "Удалить выбранный тайтл?"):
             return
         self.db.delete_title(self.current_title_id)
         self.current_title_id = None
@@ -619,166 +639,233 @@ class HSorterApp(tk.Tk):
         self.clear_form()
 
     def collect_form_data(self) -> dict:
-        status_data = {status: var.get() for status, var in self.status_vars.items()}
-        info_values = [var.get() for var in self.info_vars]
+        status_data = {status: check.get_active() for status, check in self.status_checks.items()}
         return {
-            "main_title": self.main_title_var.get().strip(),
-            "alt_titles": self.alt_titles_var.get().strip(),
-            "rating": self.rating_var.get(),
-            "personal_rating": self.personal_rating_var.get(),
-            "censored": self.censored_var.get(),
-            "year_start": self.year_start_var.get(),
-            "year_end": self.year_end_var.get(),
-            "episodes": self.episodes_var.get(),
-            "total_duration": self.duration_var.get().strip(),
-            "description": self.description_text.get("1.0", tk.END).strip(),
-            "country": info_values[0],
-            "production": info_values[1],
-            "director": info_values[2],
-            "character_designer": info_values[3],
-            "author": info_values[4],
-            "composer": info_values[5],
-            "subtitles_author": info_values[6],
-            "voice_author": info_values[7],
+            "main_title": self.main_title.get_text().strip(),
+            "alt_titles": self.alt_titles.get_text().strip(),
+            "rating": int(self.rating_spin.get_value()),
+            "personal_rating": int(self.personal_rating_spin.get_value()),
+            "censored": self.censored_check.get_active(),
+            "year_start": int(self.year_start.get_value()),
+            "year_end": int(self.year_end.get_value()),
+            "episodes": int(self.episodes_spin.get_value()),
+            "total_duration": self.duration_entry.get_text().strip(),
+            "description": self.description_buffer.get_text(
+                self.description_buffer.get_start_iter(),
+                self.description_buffer.get_end_iter(),
+                True,
+            ).strip(),
+            "country": self.info_entries["Страна"].get_text().strip(),
+            "production": self.info_entries["Производство"].get_text().strip(),
+            "director": self.info_entries["Режиссёр"].get_text().strip(),
+            "character_designer": self.info_entries["Дизайнер персонажей"].get_text().strip(),
+            "author": self.info_entries["Автор сценария/оригинала"].get_text().strip(),
+            "composer": self.info_entries["Композитор"].get_text().strip(),
+            "subtitles_author": self.info_entries["Автор субтитров"].get_text().strip(),
+            "voice_author": self.info_entries["Автор озвучки"].get_text().strip(),
             "status": status_data,
-            "tags": self.tags_var.get().strip(),
-            "cover_path": getattr(self, "cover_path", ""),
+            "tags": self.tags_entry.get_text().strip(),
+            "cover_path": self.cover_path,
         }
 
     def clear_form(self) -> None:
-        self.main_title_var.set("")
-        self.alt_titles_var.set("")
-        self.rating_var.set(1)
-        self.personal_rating_var.set(1)
-        self.censored_var.set(False)
+        self.main_title.set_text("")
+        self.alt_titles.set_text("")
+        self.rating_spin.set_value(1)
+        self.personal_rating_spin.set_value(1)
+        self.censored_check.set_active(False)
         year = datetime.date.today().year
-        self.year_start_var.set(year)
-        self.year_end_var.set(year)
-        self.episodes_var.set(0)
-        self.duration_var.set("")
-        self.description_text.delete("1.0", tk.END)
-        for var in self.info_vars:
-            var.set("")
-        for status_var in self.status_vars.values():
-            status_var.set(False)
-        self.tags_var.set("")
+        self.year_start.set_value(year)
+        self.year_end.set_value(year)
+        self.episodes_spin.set_value(0)
+        self.duration_entry.set_text("")
+        self.description_buffer.set_text("")
+        for entry in self.info_entries.values():
+            entry.set_text("")
+        for check in self.status_checks.values():
+            check.set_active(False)
+        self.tags_entry.set_text("")
         self.cover_path = ""
-        self._set_cover("")
-        self.images_list.delete(0, tk.END)
-        self.videos_list.delete(0, tk.END)
+        self.cover_image.clear()
+        for row in self.images_list.get_children():
+            self.images_list.remove(row)
+        for row in self.videos_list.get_children():
+            self.videos_list.remove(row)
 
     def add_tag(self) -> None:
-        current = self.tags_var.get().strip()
-        new_tag = simpledialog.askstring("Тег", "Введите новый тег")
-        if not new_tag:
+        dialog = Gtk.Dialog(title="Тег", transient_for=self, modal=True)
+        dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Добавить", Gtk.ResponseType.OK)
+        entry = Gtk.Entry()
+        content = dialog.get_content_area()
+        content.add(Gtk.Label(label="Введите новый тег"))
+        content.add(entry)
+        dialog.show_all()
+        response = dialog.run()
+        new_tag = entry.get_text().strip()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK or not new_tag:
             return
+        current = self.tags_entry.get_text().strip()
         if current:
             tags = [t.strip() for t in current.split(",") if t.strip()]
-            tags.append(new_tag.strip())
-            self.tags_var.set(", ".join(sorted(set(tags))))
+            tags.append(new_tag)
+            self.tags_entry.set_text(", ".join(sorted(set(tags))))
         else:
-            self.tags_var.set(new_tag.strip())
+            self.tags_entry.set_text(new_tag)
 
     def pick_cover(self) -> None:
-        file_path = filedialog.askopenfilename(
+        dialog = Gtk.FileChooserDialog(
             title="Выберите изображение",
-            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.gif"), ("Все", "*")],
+            transient_for=self,
+            action=Gtk.FileChooserAction.OPEN,
         )
-        if file_path:
-            self.cover_path = file_path
-            self._set_cover(file_path)
+        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Выбрать", Gtk.ResponseType.OK)
+        filter_images = Gtk.FileFilter()
+        filter_images.add_mime_type("image/png")
+        filter_images.add_mime_type("image/jpeg")
+        filter_images.add_mime_type("image/bmp")
+        filter_images.add_mime_type("image/gif")
+        dialog.add_filter(filter_images)
+        if dialog.run() == Gtk.ResponseType.OK:
+            filename = dialog.get_filename()
+            if filename:
+                self.cover_path = filename
+                self._set_cover(self.cover_path)
+        dialog.destroy()
 
-    def on_cover_drop(self, event) -> None:
-        path = self._normalize_drop_path(event.data)
+    def on_cover_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
+        path = self._first_path_from_drop(data)
         if path:
             self.cover_path = path
             self._set_cover(path)
 
-    def _normalize_drop_path(self, data: str) -> str:
-        if not data:
-            return ""
-        if data.startswith("{") and data.endswith("}"):
-            data = data.strip("{}").split("} {")[0]
-        return data.split()[0]
+    def _first_path_from_drop(self, data: Gtk.SelectionData) -> str:
+        paths = self._extract_paths(data)
+        return paths[0] if paths else ""
+
+    def _extract_paths(self, data: Gtk.SelectionData) -> list:
+        uris = data.get_uris()
+        paths = []
+        for uri in uris:
+            file = Gio.File.new_for_uri(uri)
+            path = file.get_path()
+            if path:
+                paths.append(path)
+        return paths
 
     def refresh_media_lists(self) -> None:
-        self.images_list.delete(0, tk.END)
-        self.videos_list.delete(0, tk.END)
+        for row in self.images_list.get_children():
+            self.images_list.remove(row)
+        for row in self.videos_list.get_children():
+            self.videos_list.remove(row)
         if not self.current_title_id:
             return
         for item in self.db.list_media(self.current_title_id, "image"):
-            self.images_list.insert(tk.END, os.path.basename(item["path"]))
+            row = Gtk.ListBoxRow()
+            row.add(Gtk.Label(label=os.path.basename(item["path"]), xalign=0))
+            self.images_list.add(row)
         for item in self.db.list_media(self.current_title_id, "video"):
-            info = f"{os.path.basename(item['path'])}"
+            text = os.path.basename(item["path"])
             if item["info"]:
-                info += f"\n  {item['info']}"
-            self.videos_list.insert(tk.END, info)
+                text += f"\n  {item['info']}"
+            row = Gtk.ListBoxRow()
+            row.add(Gtk.Label(label=text, xalign=0))
+            self.videos_list.add(row)
+        self.images_list.show_all()
+        self.videos_list.show_all()
 
     def add_image(self) -> None:
         if not self.current_title_id:
-            messagebox.showwarning("Нет тайтла", "Сначала выберите тайтл.")
+            self._message("Нет тайтла", "Сначала выберите тайтл.")
             return
-        paths = filedialog.askopenfilenames(
-            title="Выберите изображения",
-            filetypes=[("Изображения", "*.png *.jpg *.jpeg *.bmp *.gif"), ("Все", "*")],
-        )
+        paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp"])
         for path in paths:
             self.db.add_media(self.current_title_id, "image", path, "")
         self.refresh_media_lists()
 
     def add_video(self) -> None:
         if not self.current_title_id:
-            messagebox.showwarning("Нет тайтла", "Сначала выберите тайтл.")
+            self._message("Нет тайтла", "Сначала выберите тайтл.")
             return
-        paths = filedialog.askopenfilenames(
-            title="Выберите видео",
-            filetypes=[("Видео", "*.mkv *.mp4 *.avi *.mov *.wmv"), ("Все", "*")],
-        )
+        paths = self._pick_files("Выберите видео", ["video/x-matroska", "video/mp4", "video/quicktime"])
         for path in paths:
             info = MediaInfo.describe_video(path)
             self.db.add_media(self.current_title_id, "video", path, info)
         self.refresh_media_lists()
 
-    def on_images_drop(self, event) -> None:
+    def on_images_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         if not self.current_title_id:
             return
-        for path in self._extract_paths(event.data):
+        for path in self._extract_paths(data):
             self.db.add_media(self.current_title_id, "image", path, "")
         self.refresh_media_lists()
 
-    def on_videos_drop(self, event) -> None:
+    def on_videos_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         if not self.current_title_id:
             return
-        for path in self._extract_paths(event.data):
+        for path in self._extract_paths(data):
             info = MediaInfo.describe_video(path)
             self.db.add_media(self.current_title_id, "video", path, info)
         self.refresh_media_lists()
 
-    def _extract_paths(self, data: str) -> list:
-        if not data:
-            return []
-        if data.startswith("{"):
-            parts = []
-            current = ""
-            in_brace = False
-            for char in data:
-                if char == "{":
-                    in_brace = True
-                    current = ""
-                    continue
-                if char == "}":
-                    in_brace = False
-                    parts.append(current)
-                    continue
-                if in_brace:
-                    current += char
-            return parts
-        return data.split()
+    def _pick_files(self, title: str, mime_types: list) -> list:
+        dialog = Gtk.FileChooserDialog(
+            title=title, transient_for=self, action=Gtk.FileChooserAction.OPEN
+        )
+        dialog.add_buttons("Отмена", Gtk.ResponseType.CANCEL, "Выбрать", Gtk.ResponseType.OK)
+        dialog.set_select_multiple(True)
+        filter_media = Gtk.FileFilter()
+        for mime in mime_types:
+            filter_media.add_mime_type(mime)
+        dialog.add_filter(filter_media)
+        paths = []
+        if dialog.run() == Gtk.ResponseType.OK:
+            for filename in dialog.get_filenames():
+                if filename:
+                    paths.append(filename)
+        dialog.destroy()
+        return paths
+
+    def _message(self, title: str, body: str) -> None:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.INFO,
+            buttons=Gtk.ButtonsType.OK,
+            text=title,
+        )
+        dialog.format_secondary_text(body)
+        dialog.run()
+        dialog.destroy()
+
+    def _confirm(self, title: str, body: str) -> bool:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=title,
+        )
+        dialog.format_secondary_text(body)
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.YES
+
+
+class HSorterApp(Gtk.Application):
+    def __init__(self) -> None:
+        super().__init__(application_id="com.example.hsorter")
+        self.db = Database(os.path.join(os.path.dirname(__file__), "hsorter.sqlite"))
+
+    def do_activate(self) -> None:
+        win = HSorterWindow(self, self.db)
+        win.show_all()
 
 
 def main() -> None:
     app = HSorterApp()
-    app.mainloop()
+    app.run(None)
 
 
 if __name__ == "__main__":
