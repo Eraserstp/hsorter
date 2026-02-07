@@ -454,7 +454,6 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.status_checks[status] = check
             status_box.pack_start(check, False, False, 0)
         self.status_button.set_popover(status_popover)
-        status_popover.show_all()
         self.details_box.pack_start(self._row("Статус", self.status_button), False, False, 0)
 
         rating_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
