@@ -552,6 +552,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.images_view.connect("item-activated", self.on_image_activated)
         self.images_view.connect("button-press-event", self.on_images_menu)
         self.images_store.connect("rows-reordered", self.on_images_reordered)
+        self.images_view.connect("drag-end", self.on_images_drag_end)
         images_scroller = Gtk.ScrolledWindow()
         images_scroller.set_vexpand(True)
         images_scroller.add(self.images_view)
@@ -577,6 +578,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.videos_view.set_reorderable(True)
         self.videos_view.connect("button-press-event", self.on_videos_menu)
         self.videos_store.connect("rows-reordered", self.on_videos_reordered)
+        self.videos_view.connect("drag-end", self.on_videos_drag_end)
         videos_scroller = Gtk.ScrolledWindow()
         videos_scroller.set_vexpand(True)
         videos_scroller.add(self.videos_view)
@@ -952,6 +954,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def on_images_reordered(self, _model, _path, _iter, _new_order) -> None:
         self._persist_media_order(self.images_store)
 
+    # Дублируем сохранение порядка после drag-and-drop для Gtk.IconView.
+    def on_images_drag_end(self, *_args) -> None:
+        self._persist_media_order(self.images_store)
+
     # Обработка drop для списка видео.
     def on_videos_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         if not self.current_title_id:
@@ -991,6 +997,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Сохранение порядка видео после drag-and-drop.
     def on_videos_reordered(self, _model, _path, _iter, _new_order) -> None:
+        self._persist_media_order(self.videos_store)
+
+    # Дублируем сохранение порядка после drag-and-drop для Gtk.TreeView.
+    def on_videos_drag_end(self, *_args) -> None:
         self._persist_media_order(self.videos_store)
 
     # Универсальный способ сохранить порядок по текущей модели.
