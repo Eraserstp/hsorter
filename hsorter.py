@@ -916,6 +916,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         column = Gtk.TreeViewColumn("Видео", renderer, text=0)
         self.videos_view.append_column(column)
         self.videos_view.set_reorderable(True)
+        self.videos_view.set_has_tooltip(True)
+        self.videos_view.connect("query-tooltip", self.on_video_tooltip)
         self.videos_view.connect("button-press-event", self.on_videos_menu)
         self.videos_view.connect("row-activated", self.on_video_activated)
         self.videos_store.connect("rows-reordered", self.on_videos_reordered)
@@ -1358,6 +1360,28 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not media_id:
             return
         self._open_video_details_dialog(media_id, media_path)
+
+    def on_video_tooltip(self, view, x, y, keyboard_mode, tooltip) -> bool:
+        path_info = view.get_path_at_pos(x, y)
+        if not path_info:
+            return False
+        path, _column, _cell_x, _cell_y = path_info
+        model = view.get_model()
+        tree_iter = model.get_iter(path)
+        media_id = model.get_value(tree_iter, 2)
+        if not media_id:
+            return False
+        media_row = self._get_media_row(media_id)
+        thumb_path = media_row["thumbnail_path"] if media_row else ""
+        if not thumb_path or not os.path.exists(thumb_path):
+            return False
+        pixbuf = self._load_pixbuf(thumb_path)
+        if not pixbuf:
+            return False
+        image = Gtk.Image.new_from_pixbuf(pixbuf)
+        tooltip.set_custom(image)
+        tooltip.set_tip_area(view.get_cell_area(path, _column))
+        return True
 
     # Контекстное меню для удаления видео.
     def on_videos_menu(self, view, event) -> bool:
