@@ -47,8 +47,8 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 main_title TEXT NOT NULL,
                 alt_titles TEXT DEFAULT "",
-                rating INTEGER DEFAULT 1,
-                personal_rating INTEGER DEFAULT 1,
+                rating INTEGER,
+                personal_rating INTEGER,
                 censored INTEGER DEFAULT 0,
                 year_start INTEGER,
                 year_end INTEGER,
@@ -63,6 +63,7 @@ class Database:
                 composer TEXT DEFAULT "",
                 subtitles_author TEXT DEFAULT "",
                 voice_author TEXT DEFAULT "",
+                title_comment TEXT DEFAULT "",
                 status_json TEXT DEFAULT "{}",
                 tags TEXT DEFAULT "",
                 cover_path TEXT DEFAULT ""
@@ -123,6 +124,8 @@ class Database:
             cur.execute("ALTER TABLE media ADD COLUMN thumbnail_path TEXT DEFAULT ''")
         if not self._column_exists("media", "comment"):
             cur.execute("ALTER TABLE media ADD COLUMN comment TEXT DEFAULT ''")
+        if not self._column_exists("titles", "title_comment"):
+            cur.execute("ALTER TABLE titles ADD COLUMN title_comment TEXT DEFAULT ''")
         self.conn.commit()
 
     # Проверяем наличие колонки в таблице.
@@ -160,9 +163,10 @@ class Database:
                 main_title, alt_titles, rating, personal_rating, censored,
                 year_start, year_end, episodes, total_duration, description,
                 country, production, director, character_designer, author,
-                composer, subtitles_author, voice_author, status_json, tags, cover_path
+                composer, subtitles_author, voice_author, title_comment,
+                status_json, tags, cover_path
             )
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 data.get("main_title", ""),
@@ -183,6 +187,7 @@ class Database:
                 data.get("composer", ""),
                 data.get("subtitles_author", ""),
                 data.get("voice_author", ""),
+                data.get("title_comment", ""),
                 json.dumps(data.get("status", {}), ensure_ascii=False),
                 data.get("tags", ""),
                 data.get("cover_path", ""),
@@ -215,6 +220,7 @@ class Database:
                 composer=?,
                 subtitles_author=?,
                 voice_author=?,
+                title_comment=?,
                 status_json=?,
                 tags=?,
                 cover_path=?
@@ -239,6 +245,7 @@ class Database:
                 data.get("composer", ""),
                 data.get("subtitles_author", ""),
                 data.get("voice_author", ""),
+                data.get("title_comment", ""),
                 json.dumps(data.get("status", {}), ensure_ascii=False),
                 data.get("tags", ""),
                 data.get("cover_path", ""),
@@ -714,12 +721,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.details_box.pack_start(self._row("Статус", self.status_button), False, False, 0)
 
         rating_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.rating_spin = Gtk.SpinButton.new_with_range(1, 10, 1)
-        self.personal_rating_spin = Gtk.SpinButton.new_with_range(1, 10, 1)
+        self.rating_entry = Gtk.Entry()
+        self.personal_rating_entry = Gtk.Entry()
         self.censored_check = Gtk.CheckButton(label="Цензура")
-        rating_row.pack_start(self._row("Рейтинг", self.rating_spin), True, True, 0)
+        rating_row.pack_start(self._row("Рейтинг", self.rating_entry), True, True, 0)
         rating_row.pack_start(
-            self._row("Личный рейтинг", self.personal_rating_spin), True, True, 0
+            self._row("Личный рейтинг", self.personal_rating_entry), True, True, 0
         )
         rating_row.pack_start(self.censored_check, False, False, 0)
         self.details_box.pack_start(rating_row, False, False, 0)
@@ -727,9 +734,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         year_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         current_year = datetime.date.today().year
         self.year_start = Gtk.SpinButton.new_with_range(1900, current_year + 5, 1)
-        self.year_end = Gtk.SpinButton.new_with_range(1900, current_year + 5, 1)
+        self.year_end = Gtk.Entry()
         self.year_start.set_value(current_year)
-        self.year_end.set_value(current_year)
+        self.year_end.set_text("")
+        self.year_start.connect("value-changed", self.on_year_start_changed)
+        self.year_end.connect("changed", self.on_year_end_changed)
         self.episodes_spin = Gtk.SpinButton.new_with_range(0, 10000, 1)
         self.duration_entry = Gtk.Entry()
         year_row.pack_start(self._row("Год начала", self.year_start), True, True, 0)
@@ -748,13 +757,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self._section("Краткое описание", description_scroller), True, True, 0
         )
 
-        info_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
-        info_grid.set_margin_top(6)
-        info_grid.set_margin_bottom(6)
-        info_grid.set_margin_start(6)
-        info_grid.set_margin_end(6)
         info_frame = Gtk.Frame(label="Сведения")
-        info_frame.add(info_grid)
+        info_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        info_box.set_margin_top(6)
+        info_box.set_margin_bottom(6)
+        info_box.set_margin_start(6)
+        info_box.set_margin_end(6)
+        info_frame.add(info_box)
+        info_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
         self.info_entries = {}
         labels = [
             "Страна",
@@ -771,6 +781,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.info_entries[label] = entry
             info_grid.attach(Gtk.Label(label=label, xalign=0), 0, idx, 1, 1)
             info_grid.attach(entry, 1, idx, 1, 1)
+        info_box.pack_start(info_grid, True, True, 0)
+        self.title_comment_buffer = Gtk.TextBuffer()
+        comment_view = Gtk.TextView(buffer=self.title_comment_buffer)
+        comment_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        comment_scroller = Gtk.ScrolledWindow()
+        comment_scroller.set_size_request(240, 160)
+        comment_scroller.set_vexpand(True)
+        comment_scroller.add(comment_view)
+        comment_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        comment_label = Gtk.Label(label="Комментарий")
+        comment_label.set_xalign(0)
+        comment_box.pack_start(comment_label, False, False, 0)
+        comment_box.pack_start(comment_scroller, True, True, 0)
+        info_box.pack_start(comment_box, True, True, 0)
         self.details_box.pack_start(info_frame, False, False, 0)
 
         tags_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -917,11 +941,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.cover_path = title["cover_path"] or ""
         self.main_title.set_text(title["main_title"])
         self.alt_titles.set_text(title["alt_titles"])
-        self.rating_spin.set_value(title["rating"])
-        self.personal_rating_spin.set_value(title["personal_rating"])
+        self.rating_entry.set_text("" if title["rating"] is None else str(title["rating"]))
+        self.personal_rating_entry.set_text(
+            "" if title["personal_rating"] is None else str(title["personal_rating"])
+        )
         self.censored_check.set_active(bool(title["censored"]))
         self.year_start.set_value(title["year_start"] or datetime.date.today().year)
-        self.year_end.set_value(title["year_end"] or datetime.date.today().year)
+        self.year_end.set_text(str(title["year_end"] or ""))
         self.episodes_spin.set_value(title["episodes"] or 0)
         self.duration_entry.set_text(title["total_duration"])
         self.description_buffer.set_text(title["description"] or "")
@@ -937,6 +963,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         }
         for key, entry in self.info_entries.items():
             entry.set_text(info_map.get(key, ""))
+        self.title_comment_buffer.set_text(title["title_comment"] or "")
         self.tags_entry.set_text(title["tags"])
         status_data = json.loads(title["status_json"] or "{}")
         for status, check in self.status_checks.items():
@@ -1024,11 +1051,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         return {
             "main_title": self.main_title.get_text().strip(),
             "alt_titles": self.alt_titles.get_text().strip(),
-            "rating": int(self.rating_spin.get_value()),
-            "personal_rating": int(self.personal_rating_spin.get_value()),
+            "rating": self._parse_optional_int(self.rating_entry.get_text().strip()),
+            "personal_rating": self._parse_optional_int(
+                self.personal_rating_entry.get_text().strip()
+            ),
             "censored": self.censored_check.get_active(),
             "year_start": int(self.year_start.get_value()),
-            "year_end": int(self.year_end.get_value()),
+            "year_end": self._parse_optional_int(self.year_end.get_text().strip()),
             "episodes": int(self.episodes_spin.get_value()),
             "total_duration": self.duration_entry.get_text().strip(),
             "description": self.description_buffer.get_text(
@@ -1044,6 +1073,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "composer": self.info_entries["Композитор"].get_text().strip(),
             "subtitles_author": self.info_entries["Автор субтитров"].get_text().strip(),
             "voice_author": self.info_entries["Автор озвучки"].get_text().strip(),
+            "title_comment": self.title_comment_buffer.get_text(
+                self.title_comment_buffer.get_start_iter(),
+                self.title_comment_buffer.get_end_iter(),
+                True,
+            ).strip(),
             "status": status_data,
             "tags": self.tags_entry.get_text().strip(),
             "cover_path": self.cover_path,
@@ -1053,17 +1087,18 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def clear_form(self) -> None:
         self.main_title.set_text("")
         self.alt_titles.set_text("")
-        self.rating_spin.set_value(1)
-        self.personal_rating_spin.set_value(1)
+        self.rating_entry.set_text("")
+        self.personal_rating_entry.set_text("")
         self.censored_check.set_active(False)
         year = datetime.date.today().year
         self.year_start.set_value(year)
-        self.year_end.set_value(year)
+        self.year_end.set_text("")
         self.episodes_spin.set_value(0)
         self.duration_entry.set_text("")
         self.description_buffer.set_text("")
         for entry in self.info_entries.values():
             entry.set_text("")
+        self.title_comment_buffer.set_text("")
         for check in self.status_checks.values():
             check.set_active(False)
         self.tags_entry.set_text("")
@@ -1323,6 +1358,27 @@ class HSorterWindow(Gtk.ApplicationWindow):
         check.add(label)
         label.show()
         return check
+
+    def _parse_optional_int(self, value: str) -> int | None:
+        if not value:
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    def on_year_start_changed(self, _spin) -> None:
+        start_year = int(self.year_start.get_value())
+        end_year_text = self.year_end.get_text().strip()
+        end_year = self._parse_optional_int(end_year_text)
+        if end_year is None or start_year > end_year:
+            self.year_end.set_text(str(start_year))
+
+    def on_year_end_changed(self, _entry) -> None:
+        start_year = int(self.year_start.get_value())
+        end_year = self._parse_optional_int(self.year_end.get_text().strip())
+        if end_year is None or start_year > end_year:
+            self.year_end.set_text(str(start_year))
 
     # Реакция на изменение основного названия тайтла.
     def on_main_title_changed(self, _entry) -> None:
