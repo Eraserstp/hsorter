@@ -254,6 +254,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
         "character_designer": "",
         "author": writer.strip(),
         "composer": "",
+        "subtitles_author": fangroup,
         "voice_author": "",
         "title_comment": "",
         "url": url.strip(),
