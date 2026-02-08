@@ -1386,8 +1386,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         pixbuf = self._load_pixbuf(thumb_path)
         if not pixbuf:
             return False
-        image = Gtk.Image.new_from_pixbuf(pixbuf)
-        tooltip.set_custom(image)
+        tooltip.set_icon(pixbuf)
         tooltip.set_tip_area(view.get_cell_area(path, _column))
         return True
 
