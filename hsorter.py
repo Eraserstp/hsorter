@@ -705,9 +705,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         status_scroller.add(status_box)
         status_popover.add(status_scroller)
         for status in STATUS_OPTIONS:
-            check = Gtk.CheckButton(label=status)
-            check.set_use_markup(True)
-            check.set_label(self._format_status_label(status))
+            check = self._build_status_check(status)
             self.status_checks[status] = check
             status_box.pack_start(check, False, False, 0)
         status_popover.show_all()
@@ -1315,6 +1313,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     def _format_status_label(self, status: str) -> str:
         return self._format_status_span(status)
+
+    def _build_status_check(self, status: str) -> Gtk.CheckButton:
+        check = Gtk.CheckButton()
+        label = Gtk.Label()
+        label.set_xalign(0)
+        label.set_use_markup(True)
+        label.set_markup(self._format_status_label(status))
+        check.add(label)
+        label.show()
+        return check
 
     # Реакция на изменение основного названия тайтла.
     def on_main_title_changed(self, _entry) -> None:
