@@ -68,6 +68,14 @@ class Database:
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS media (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title_id INTEGER NOT NULL,
@@ -261,6 +269,23 @@ class Database:
                 (name,),
             ).fetchone()
         return row is not None
+
+    # Получить значение настройки по ключу.
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        cur = self.conn.cursor()
+        row = cur.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if row:
+            return row["value"]
+        return default
+
+    # Сохранить значение настройки по ключу.
+    def set_setting(self, key: str, value: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            (key, value),
+        )
+        self.conn.commit()
 
     # Список медиафайлов по типу (image/video).
     def list_media(self, title_id: int, media_type: str):
@@ -554,24 +579,27 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.new_title_mode = False
 
         self._build_ui()
+        self._load_window_settings()
+        self.connect("destroy", self._save_window_settings)
         self.refresh_titles()
 
     # Общая разметка: три колонки.
     def _build_ui(self) -> None:
-        root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
-        root.set_margin_top(10)
-        root.set_margin_bottom(10)
-        root.set_margin_start(10)
-        root.set_margin_end(10)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.add(root)
+
+        self.main_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        root.pack_start(self.main_paned, True, True, 0)
 
         self.library_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.media_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
 
-        root.pack_start(self.library_box, True, True, 0)
-        root.pack_start(self.details_box, True, True, 0)
-        root.pack_start(self.media_box, True, True, 0)
+        self.main_paned.add1(self.library_box)
+        self.right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.right_paned.add1(self.details_box)
+        self.right_paned.add2(self.media_box)
+        self.main_paned.add2(self.right_paned)
 
         self._build_library()
         self._build_details()
@@ -1717,6 +1745,35 @@ class HSorterWindow(Gtk.ApplicationWindow):
         response = dialog.run()
         dialog.destroy()
         return response == Gtk.ResponseType.YES
+
+    # Загрузка размеров окна и позиций разделителей.
+    def _load_window_settings(self) -> None:
+        size_value = self.db.get_setting("window_size")
+        if size_value:
+            try:
+                width, height = json.loads(size_value)
+                self.resize(int(width), int(height))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        main_pos = self.db.get_setting("main_paned_pos")
+        if main_pos:
+            try:
+                self.main_paned.set_position(int(main_pos))
+            except ValueError:
+                pass
+        right_pos = self.db.get_setting("right_paned_pos")
+        if right_pos:
+            try:
+                self.right_paned.set_position(int(right_pos))
+            except ValueError:
+                pass
+
+    # Сохранение размеров окна и позиций разделителей.
+    def _save_window_settings(self, *_args) -> None:
+        width, height = self.get_size()
+        self.db.set_setting("window_size", json.dumps([width, height]))
+        self.db.set_setting("main_paned_pos", str(self.main_paned.get_position()))
+        self.db.set_setting("right_paned_pos", str(self.right_paned.get_position()))
 
 
 # Приложение GTK.
