@@ -1,3 +1,5 @@
+"""GUI-приложение для ведения библиотеки фильмов/сериалов."""
+
 import datetime
 import json
 import os
@@ -32,6 +34,7 @@ STATUS_OPTIONS = [
 
 # Обёртка над SQLite для хранения карточек тайтлов и медиафайлов.
 class Database:
+    """Обёртка над SQLite с операциями для UI и импорта."""
     # Инициализируем соединение и создаём таблицы, если их ещё нет.
     def __init__(self, path: str) -> None:
         self.path = path
@@ -311,6 +314,7 @@ class Database:
 
     # Получить значение настройки по ключу.
     def get_setting(self, key: str, default: str | None = None) -> str | None:
+        """Читает значение настройки по ключу."""
         cur = self.conn.cursor()
         row = cur.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
         if row:
@@ -319,6 +323,7 @@ class Database:
 
     # Сохранить значение настройки по ключу.
     def set_setting(self, key: str, value: str) -> None:
+        """Записывает значение настройки по ключу."""
         cur = self.conn.cursor()
         cur.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
@@ -463,9 +468,11 @@ class Database:
 
 # Извлечение информации о видео через pymediainfo или CLI mediainfo.
 class MediaInfo:
+    """Получение информации о видео через mediainfo."""
     @staticmethod
     # Главная точка входа для описания видео.
     def describe_video(path: str) -> str:
+        """Короткое описание (для списка видео)."""
         if os.path.isdir(path):
             return ""
         info = MediaInfo._from_pymediainfo(path)
@@ -537,6 +544,7 @@ class MediaInfo:
     # Получаем подробную структуру из mediainfo в виде словаря.
     @staticmethod
     def get_details(path: str) -> dict:
+        """Подробные данные по дорожкам (для диалога видео)."""
         data = MediaInfo._details_from_pymediainfo(path)
         if data:
             return data

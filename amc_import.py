@@ -1,3 +1,5 @@
+"""CLI-импорт XML Ant Movie Catalog в базу hsorter."""
+
 import argparse
 import datetime
 import json
@@ -7,10 +9,12 @@ import sys
 import xml.etree.ElementTree as ET
 
 
+# Поддерживаемые расширения видеофайлов при поиске соседних файлов.
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".mpg", ".mpeg"}
 
 
 def main() -> int:
+    """Точка входа CLI."""
     parser = argparse.ArgumentParser(description="Import AMC XML into hsorter SQLite")
     parser.add_argument("xml_path", help="Path to AMC XML export")
     parser.add_argument(
@@ -27,9 +31,11 @@ def main() -> int:
     args = parser.parse_args()
     xml_path = os.path.abspath(args.xml_path)
     db_path = os.path.abspath(args.db_path)
+    # Проверяем XML.
     if not os.path.exists(xml_path):
         print(f"XML not found: {xml_path}")
         return 1
+    # Гарантируем наличие схемы БД (минимальный набор таблиц).
     ensure_schema(db_path)
     tree = ET.parse(xml_path)
     root = tree.getroot()
@@ -39,12 +45,15 @@ def main() -> int:
     imported = 0
     skipped = 0
     duplicates = []
+    # Проходим по фильмам/тайтлам.
     for movie in root.findall(".//Movie"):
         data = extract_movie(movie, xml_dir)
         if not data["main_title"]:
+            # Пропускаем пустые названия.
             skipped += 1
             continue
         if title_exists(conn, data["main_title"]):
+            # Дубликаты по названию не импортируем.
             duplicates.append(data["main_title"])
             print(f"Duplicate skipped: {data['main_title']}")
             skipped += 1
@@ -57,6 +66,7 @@ def main() -> int:
             for video_path in data["video_files"]:
                 add_media(conn, title_id, "video", video_path, "")
         else:
+            # Файлы не найдены — отметили статусом "отсутствует".
             print(f"Missing files: {data['main_title']}")
         imported += 1
     conn.close()
@@ -67,6 +77,7 @@ def main() -> int:
 
 
 def ensure_schema(db_path: str) -> None:
+    """Создаёт минимальную схему БД, если базы ещё нет."""
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.execute(
@@ -121,11 +132,13 @@ def ensure_schema(db_path: str) -> None:
 
 
 def title_exists(conn: sqlite3.Connection, title: str) -> bool:
+    """Проверяет наличие тайтла с таким названием."""
     row = conn.execute("SELECT 1 FROM titles WHERE main_title=? LIMIT 1", (title,)).fetchone()
     return row is not None
 
 
 def insert_title(conn: sqlite3.Connection, data: dict) -> int:
+    """Вставляет тайтл и возвращает его id."""
     cur = conn.cursor()
     cur.execute(
         """
@@ -171,6 +184,7 @@ def insert_title(conn: sqlite3.Connection, data: dict) -> int:
 
 
 def add_media(conn: sqlite3.Connection, title_id: int, media_type: str, path: str, info: str) -> None:
+    """Добавляет запись в таблицу media."""
     cur = conn.cursor()
     sort_order = next_media_order(conn, title_id, media_type)
     cur.execute(
@@ -181,6 +195,7 @@ def add_media(conn: sqlite3.Connection, title_id: int, media_type: str, path: st
 
 
 def next_media_order(conn: sqlite3.Connection, title_id: int, media_type: str) -> int:
+    """Вычисляет следующий sort_order для медиа."""
     row = conn.execute(
         "SELECT MAX(sort_order) AS max_order FROM media WHERE title_id=? AND media_type=?",
         (title_id, media_type),
@@ -189,6 +204,7 @@ def next_media_order(conn: sqlite3.Connection, title_id: int, media_type: str) -
 
 
 def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
+    """Преобразует XML Movie в словарь для вставки в БД."""
     original_title = movie.get("OriginalTitle") or ""
     formatted_title = movie.get("FormattedTitle") or ""
     director = movie.get("Director") or ""
@@ -200,6 +216,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
     date_added = movie.get("Date") or ""
     file_path = movie.get("FilePath") or ""
     picture = movie.get("Picture") or ""
+    # Доп. поля AMC.
     custom_fields = movie.find("CustomFields")
     tags = ""
     censored = False
@@ -214,6 +231,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
             episodes = int(episodes_value) if episodes_value else None
         except ValueError:
             episodes = None
+    # Даты: если AMC содержит Date, сохраняем как дату создания.
     created_at = (
         f"{date_added} 00:00"
         if date_added
@@ -221,6 +239,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
     )
     updated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     cover_path = resolve_picture(xml_dir, picture)
+    # Преобразуем Wine-путь и ищем файлы.
     video_file = resolve_windows_path(file_path)
     video_files = []
     status_json = "{}"
@@ -237,6 +256,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
         extra_path = resolve_picture(xml_dir, extra_pic)
         if extra_path:
             images.append(extra_path)
+    # Готовый словарь для insert_title().
     return {
         "main_title": original_title.strip(),
         "alt_titles": formatted_title.strip() if formatted_title != original_title else "",
@@ -269,6 +289,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
 
 
 def resolve_windows_path(path_value: str) -> str:
+    """Преобразует Windows/Wine путь вида Z:\\ в Linux-формат."""
     if not path_value:
         return ""
     normalized = path_value.replace("\\", "/")
@@ -278,6 +299,7 @@ def resolve_windows_path(path_value: str) -> str:
 
 
 def resolve_picture(xml_dir: str, relative_path: str) -> str:
+    """Разрешает относительный путь к картинке относительно XML."""
     if not relative_path:
         return ""
     path = relative_path.replace("\\", "/")
@@ -286,6 +308,7 @@ def resolve_picture(xml_dir: str, relative_path: str) -> str:
 
 
 def find_video_files(directory: str) -> list[str]:
+    """Находит все видеофайлы в каталоге."""
     if not directory or not os.path.isdir(directory):
         return []
     videos = []
@@ -300,10 +323,12 @@ def find_video_files(directory: str) -> list[str]:
 
 
 def json_status_absent() -> str:
+    """Формирует JSON статуса "отсутствует"."""
     return json.dumps({"отсутствует": True}, ensure_ascii=False)
 
 
 def merge_status_imported(status_json: str) -> str:
+    """Добавляет статус "импортировано" к существующим статусам."""
     try:
         data = json.loads(status_json) if status_json else {}
     except json.JSONDecodeError:
@@ -313,6 +338,7 @@ def merge_status_imported(status_json: str) -> str:
 
 
 def write_duplicates(duplicates: list[str]) -> None:
+    """Пишет список дубликатов в dublicates.csv."""
     with open("dublicates.csv", "w", encoding="utf-8") as handle:
         handle.write("title\n")
         for title in sorted(set(duplicates)):
