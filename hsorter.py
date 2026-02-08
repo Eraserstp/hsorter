@@ -1679,7 +1679,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "-i",
             video_path,
             "-vf",
-            "fps=1/10,scale=350:260,tile=4x5",
+            "fps=1/10,scale=360:-1,tile=4x5:padding=4:margin=4",
             "-frames:v",
             "1",
             output_path,
