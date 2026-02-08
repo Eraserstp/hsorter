@@ -605,6 +605,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.right_paned.add1(self.details_box)
         self.right_paned.add2(self.media_box)
         self.main_paned.add2(self.right_paned)
+        self.main_paned.set_wide_handle(True)
+        self.right_paned.set_wide_handle(True)
 
         self._build_library()
         self._build_details()
@@ -1761,31 +1763,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
         self._pending_window_state = self.db.get_setting("window_state")
-        self._pending_main_pos = self.db.get_setting("main_paned_pos")
-        self._pending_right_pos = self.db.get_setting("right_paned_pos")
-        self._pending_main_ratio = self.db.get_setting("main_paned_ratio")
-        self._pending_right_ratio = self.db.get_setting("right_paned_ratio")
-        GLib.idle_add(self._apply_saved_panes)
+        pos_value = self.db.get_setting("window_position")
+        if pos_value:
+            try:
+                x_pos, y_pos = json.loads(pos_value)
+                self.move(int(x_pos), int(y_pos))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        GLib.idle_add(self._apply_pane_ratio)
 
     # Сохранение размеров окна и позиций разделителей.
     def _save_window_settings(self, *_args) -> None:
         width, height = self.get_size()
         self.db.set_setting("window_size", json.dumps([width, height]))
         allocation = self.get_allocation()
-        total_width = allocation.width if allocation.width else width
-        if total_width > 0:
-            self.db.set_setting(
-                "main_paned_ratio", str(self.main_paned.get_position() / total_width)
-            )
-            right_total = total_width - self.main_paned.get_position()
-            if right_total > 0:
-                self.db.set_setting(
-                    "right_paned_ratio",
-                    str(self.right_paned.get_position() / right_total),
-                )
-        if not self.is_maximized():
-            self.db.set_setting("main_paned_pos", str(self.main_paned.get_position()))
-            self.db.set_setting("right_paned_pos", str(self.right_paned.get_position()))
+        self.db.set_setting("window_position", json.dumps([allocation.x, allocation.y]))
         state = "normal"
         if self.is_maximized():
             state = "maximized"
@@ -1797,25 +1789,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Ограничиваем позиции разделителей, чтобы элементы не сжимались слишком сильно.
     def _clamp_panes(self) -> bool:
-        allocation = self.get_allocation()
-        total_width = allocation.width if allocation.width else self.get_size()[0]
-        min_left = 100
-        min_center = 100
-        min_right = 100
-        min_main = min_left
-        min_right_pane_total = min_center + min_right
-        max_main = max(min_main, total_width - min_right_pane_total)
-        main_pos = self.main_paned.get_position()
-        clamped_main = max(min_main, min(max_main, main_pos))
-        if clamped_main != main_pos:
-            self.main_paned.set_position(clamped_main)
-        right_total = total_width - clamped_main
-        min_right_pos = min_center
-        max_right_pos = max(min_right_pos, right_total - min_right)
-        right_pos = self.right_paned.get_position()
-        clamped_right = max(min_right_pos, min(max_right_pos, right_pos))
-        if clamped_right != right_pos:
-            self.right_paned.set_position(clamped_right)
+        self._apply_pane_ratio()
         return False
 
     # Дополнительная защита: клемпим после изменения размеров окна (с задержкой).
@@ -1826,54 +1800,19 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     def _finish_clamp(self) -> bool:
         self._clamp_timeout_id = None
-        self._clamp_panes()
+        self._apply_pane_ratio()
         return False
 
-    def _apply_saved_panes(self) -> bool:
+    def _apply_pane_ratio(self) -> bool:
         allocation = self.get_allocation()
         total_width = allocation.width if allocation.width else self.get_size()[0]
-        min_left = 100
-        min_center = 100
-        min_right = 100
         if total_width <= 0:
             return False
-        main_pos = None
-        right_pos = None
-        if self._pending_main_ratio:
-            try:
-                ratio = float(self._pending_main_ratio)
-                main_pos = int(total_width * ratio)
-            except ValueError:
-                pass
-        elif self._pending_main_pos:
-            try:
-                main_pos = int(self._pending_main_pos)
-            except ValueError:
-                pass
-        if main_pos is None:
-            main_pos = self.main_paned.get_position()
+        main_pos = int(total_width * 0.2)
         right_total = total_width - main_pos
-        if self._pending_right_ratio and right_total > 0:
-            try:
-                ratio = float(self._pending_right_ratio)
-                right_pos = int(right_total * ratio)
-            except ValueError:
-                pass
-        elif self._pending_right_pos:
-            try:
-                right_pos = int(self._pending_right_pos)
-            except ValueError:
-                pass
-        if main_pos is not None:
-            max_main = max(min_left, total_width - (min_center + min_right))
-            main_pos = max(min_left, min(max_main, main_pos))
-            self.main_paned.set_position(main_pos)
-        if right_pos is not None:
-            right_total = total_width - self.main_paned.get_position()
-            max_right = max(min_center, right_total - min_right)
-            right_pos = max(min_center, min(max_right, right_pos))
-            self.right_paned.set_position(right_pos)
-        self._clamp_panes()
+        right_pos = int(right_total * 0.75)
+        self.main_paned.set_position(main_pos)
+        self.right_paned.set_position(right_pos)
         return False
 
     # Применяем состояние окна после того, как окно создано.
@@ -1886,7 +1825,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.maximize()
         elif state == "minimized":
             self.iconify()
-        GLib.idle_add(self._apply_saved_panes)
+        GLib.idle_add(self._apply_pane_ratio)
 
 
 # Приложение GTK.
