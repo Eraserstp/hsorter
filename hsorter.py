@@ -997,7 +997,6 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.videos_store = Gtk.ListStore(str, str, int)
         self.videos_view = Gtk.TreeView(model=self.videos_store)
         renderer = Gtk.CellRendererText()
-        renderer.set_property("markup", True)
         column = Gtk.TreeViewColumn("Видео", renderer, markup=0)
         self.videos_view.append_column(column)
         self.videos_view.set_reorderable(True)
