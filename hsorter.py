@@ -581,6 +581,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._build_ui()
         self._load_window_settings()
         self.connect("destroy", self._save_window_settings)
+        self.connect("size-allocate", self._on_size_allocate)
         self.refresh_titles()
 
     # Общая разметка: три колонки.
@@ -1794,7 +1795,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Ограничиваем позиции разделителей, чтобы элементы не сжимались слишком сильно.
     def _clamp_panes(self) -> bool:
-        total_width, _ = self.get_size()
+        allocation = self.get_allocation()
+        total_width = allocation.width if allocation.width else self.get_size()[0]
         min_left = 260
         min_center = 520
         min_right = 320
@@ -1813,6 +1815,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if clamped_right != right_pos:
             self.right_paned.set_position(clamped_right)
         return False
+
+    # Дополнительная защита: клемпим после перерасчёта размеров окна.
+    def _on_size_allocate(self, *_args) -> None:
+        self._clamp_panes()
 
 
 # Приложение GTK.
