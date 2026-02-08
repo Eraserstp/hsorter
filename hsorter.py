@@ -64,6 +64,9 @@ class Database:
                 subtitles_author TEXT DEFAULT "",
                 voice_author TEXT DEFAULT "",
                 title_comment TEXT DEFAULT "",
+                url TEXT DEFAULT "",
+                created_at TEXT DEFAULT "",
+                updated_at TEXT DEFAULT "",
                 status_json TEXT DEFAULT "{}",
                 tags TEXT DEFAULT "",
                 cover_path TEXT DEFAULT ""
@@ -126,6 +129,12 @@ class Database:
             cur.execute("ALTER TABLE media ADD COLUMN comment TEXT DEFAULT ''")
         if not self._column_exists("titles", "title_comment"):
             cur.execute("ALTER TABLE titles ADD COLUMN title_comment TEXT DEFAULT ''")
+        if not self._column_exists("titles", "url"):
+            cur.execute("ALTER TABLE titles ADD COLUMN url TEXT DEFAULT ''")
+        if not self._column_exists("titles", "created_at"):
+            cur.execute("ALTER TABLE titles ADD COLUMN created_at TEXT DEFAULT ''")
+        if not self._column_exists("titles", "updated_at"):
+            cur.execute("ALTER TABLE titles ADD COLUMN updated_at TEXT DEFAULT ''")
         self.conn.commit()
 
     # Проверяем наличие колонки в таблице.
@@ -135,7 +144,13 @@ class Database:
         return any(col["name"] == column for col in columns)
 
     # Получение списка тайтлов с фильтрами по названию, тегам и статусам.
-    def list_titles(self, query: str = "", tags: str = "", status_filter: str = ""):
+    def list_titles(
+        self,
+        query: str = "",
+        tags: str = "",
+        status_filter: str = "",
+        sort_by: str = "title",
+    ):
         cur = self.conn.cursor()
         sql = "SELECT * FROM titles"
         params = []
@@ -151,7 +166,10 @@ class Database:
             params.append(f"%{status_filter}%")
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY main_title COLLATE NOCASE"
+        if sort_by == "created_at":
+            sql += " ORDER BY created_at DESC, main_title COLLATE NOCASE"
+        else:
+            sql += " ORDER BY main_title COLLATE NOCASE"
         return cur.execute(sql, params).fetchall()
 
     # Добавление нового тайтла и возврат его идентификатора.
@@ -164,9 +182,10 @@ class Database:
                 year_start, year_end, episodes, total_duration, description,
                 country, production, director, character_designer, author,
                 composer, subtitles_author, voice_author, title_comment,
+                url, created_at, updated_at,
                 status_json, tags, cover_path
             )
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 data.get("main_title", ""),
@@ -188,6 +207,9 @@ class Database:
                 data.get("subtitles_author", ""),
                 data.get("voice_author", ""),
                 data.get("title_comment", ""),
+                data.get("url", ""),
+                data.get("created_at", ""),
+                data.get("updated_at", ""),
                 json.dumps(data.get("status", {}), ensure_ascii=False),
                 data.get("tags", ""),
                 data.get("cover_path", ""),
@@ -221,6 +243,9 @@ class Database:
                 subtitles_author=?,
                 voice_author=?,
                 title_comment=?,
+                url=?,
+                created_at=?,
+                updated_at=?,
                 status_json=?,
                 tags=?,
                 cover_path=?
@@ -246,6 +271,9 @@ class Database:
                 data.get("subtitles_author", ""),
                 data.get("voice_author", ""),
                 data.get("title_comment", ""),
+                data.get("url", ""),
+                data.get("created_at", ""),
+                data.get("updated_at", ""),
                 json.dumps(data.get("status", {}), ensure_ascii=False),
                 data.get("tags", ""),
                 data.get("cover_path", ""),
@@ -636,9 +664,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.filter_name = Gtk.Entry()
         self.filter_tags = Gtk.Entry()
         self.filter_status = Gtk.Entry()
+        self.filter_sort = Gtk.ComboBoxText()
+        self.filter_sort.append("title", "По названию")
+        self.filter_sort.append("created_at", "По дате добавления")
+        self.filter_sort.set_active_id("title")
         filter_box.pack_start(self._row("Название", self.filter_name), False, False, 0)
         filter_box.pack_start(self._row("Теги", self.filter_tags), False, False, 0)
         filter_box.pack_start(self._row("Статус", self.filter_status), False, False, 0)
+        filter_box.pack_start(self._row("Сортировка", self.filter_sort), False, False, 0)
         apply_button = Gtk.Button(label="Применить")
         apply_button.connect("clicked", lambda _b: self.refresh_titles())
         filter_box.pack_start(apply_button, False, False, 0)
@@ -746,6 +779,23 @@ class HSorterWindow(Gtk.ApplicationWindow):
         year_row.pack_start(self._row("Эпизоды", self.episodes_spin), True, True, 0)
         year_row.pack_start(self._row("Длительность", self.duration_entry), True, True, 0)
         self.details_box.pack_start(year_row, False, False, 0)
+
+        url_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.url_entry = Gtk.Entry()
+        open_url_button = Gtk.Button(label="Открыть ссылку")
+        open_url_button.connect("clicked", lambda _b: self.open_title_url())
+        url_row.pack_start(self._row("URL", self.url_entry), True, True, 0)
+        url_row.pack_start(open_url_button, False, False, 0)
+        self.details_box.pack_start(url_row, False, False, 0)
+
+        date_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.created_at_label = Gtk.Label(label="")
+        self.created_at_label.set_xalign(0)
+        self.updated_at_label = Gtk.Label(label="")
+        self.updated_at_label.set_xalign(0)
+        date_row.pack_start(self._row("Дата добавления", self.created_at_label), True, True, 0)
+        date_row.pack_start(self._row("Дата изменения", self.updated_at_label), True, True, 0)
+        self.details_box.pack_start(date_row, False, False, 0)
 
         self.description_buffer = Gtk.TextBuffer()
         description_view = Gtk.TextView(buffer=self.description_buffer)
@@ -903,6 +953,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             query=self.filter_name.get_text().strip(),
             tags=self.filter_tags.get_text().strip(),
             status_filter=self.filter_status.get_text().strip(),
+            sort_by=self.filter_sort.get_active_id() or "title",
         )
         self.title_rows = []
         for title in titles:
@@ -950,6 +1001,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.year_end.set_text(str(title["year_end"] or ""))
         self.episodes_spin.set_value(title["episodes"] or 0)
         self.duration_entry.set_text(title["total_duration"])
+        self.url_entry.set_text(title["url"] or "")
+        self.created_at_label.set_text(title["created_at"] or "")
+        self.updated_at_label.set_text(title["updated_at"] or "")
         self.description_buffer.set_text(title["description"] or "")
         info_map = {
             "Страна": title["country"],
@@ -1022,7 +1076,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not self._update_save_state():
             return
         data = self.collect_form_data()
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         if self.new_title_mode:
+            data["created_at"] = now
+            data["updated_at"] = now
             title_id = self.db.add_title(data)
             self.new_title_mode = False
             self.refresh_titles()
@@ -1031,6 +1088,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if not self.current_title_id:
                 self._message("Нет тайтла", "Выберите тайтл в списке.")
                 return
+            data["updated_at"] = now
             self.db.update_title(self.current_title_id, data)
             self.refresh_titles()
 
@@ -1078,9 +1136,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 self.title_comment_buffer.get_end_iter(),
                 True,
             ).strip(),
+            "url": self.url_entry.get_text().strip(),
             "status": status_data,
             "tags": self.tags_entry.get_text().strip(),
             "cover_path": self.cover_path,
+            "created_at": self.created_at_label.get_text(),
+            "updated_at": self.updated_at_label.get_text(),
         }
 
     # Очистить форму, если тайтл удалён или не выбран.
@@ -1099,6 +1160,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         for entry in self.info_entries.values():
             entry.set_text("")
         self.title_comment_buffer.set_text("")
+        self.url_entry.set_text("")
+        self.created_at_label.set_text("")
+        self.updated_at_label.set_text("")
         for check in self.status_checks.values():
             check.set_active(False)
         self.tags_entry.set_text("")
@@ -1379,6 +1443,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
         end_year = self._parse_optional_int(self.year_end.get_text().strip())
         if end_year is None or start_year > end_year:
             self.year_end.set_text(str(start_year))
+
+    def open_title_url(self) -> None:
+        url = self.url_entry.get_text().strip()
+        if not url:
+            return
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        Gio.AppInfo.launch_default_for_uri(url, None)
 
     # Реакция на изменение основного названия тайтла.
     def on_main_title_changed(self, _entry) -> None:
