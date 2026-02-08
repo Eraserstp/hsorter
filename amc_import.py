@@ -212,6 +212,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
     writer = movie.get("Writer") or ""
     year = movie.get("Year") or ""
     length = movie.get("Length") or ""
+    description = movie.get("Description") or ""
     url = movie.get("URL") or ""
     date_added = movie.get("Date") or ""
     file_path = movie.get("FilePath") or ""
@@ -267,7 +268,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
         "year_end": None,
         "episodes": episodes or 0,
         "total_duration": length.strip(),
-        "description": "",
+        "description": description.strip(),
         "country": "",
         "production": producer.strip(),
         "director": director.strip(),
