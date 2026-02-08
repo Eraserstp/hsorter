@@ -320,4 +320,3 @@ def write_duplicates(duplicates: list[str]) -> None:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-        "subtitles_author": fangroup,
