@@ -2,8 +2,10 @@
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import xml.etree.ElementTree as ET
@@ -239,7 +241,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
         else datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     )
     updated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    cover_path = resolve_picture(xml_dir, picture)
+    cover_path = cache_image(resolve_picture(xml_dir, picture))
     # Преобразуем Wine-путь и ищем файлы.
     video_file = resolve_windows_path(file_path)
     video_files = []
@@ -256,7 +258,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
         extra_pic = extra.get("EPicture") or ""
         extra_path = resolve_picture(xml_dir, extra_pic)
         if extra_path:
-            images.append(extra_path)
+            images.append(cache_image(extra_path))
     # Готовый словарь для insert_title().
     return {
         "main_title": original_title.strip(),
@@ -306,6 +308,35 @@ def resolve_picture(xml_dir: str, relative_path: str) -> str:
     path = relative_path.replace("\\", "/")
     full_path = os.path.abspath(os.path.join(xml_dir, path))
     return full_path if os.path.exists(full_path) else ""
+
+
+def cache_dir() -> str:
+    """Возвращает путь к каталогу кеша изображений."""
+    cache_path = os.path.join(os.path.dirname(__file__), ".hsorter_cache")
+    os.makedirs(cache_path, exist_ok=True)
+    return cache_path
+
+
+def cache_image(path_value: str) -> str:
+    """Копирует изображение в кеш и возвращает путь к копии."""
+    if not path_value or not os.path.exists(path_value):
+        return path_value
+    abs_path = os.path.abspath(path_value)
+    cache_path = cache_dir()
+    try:
+        if os.path.commonpath([abs_path, cache_path]) == cache_path:
+            return abs_path
+    except ValueError:
+        pass
+    ext = os.path.splitext(abs_path)[1].lower() or ".img"
+    stat_info = os.stat(abs_path)
+    digest = hashlib.sha256(
+        f"{abs_path}|{stat_info.st_mtime_ns}|{stat_info.st_size}".encode("utf-8")
+    ).hexdigest()[:16]
+    cached_path = os.path.join(cache_path, f"image_{digest}{ext}")
+    if not os.path.exists(cached_path):
+        shutil.copy2(abs_path, cached_path)
+    return cached_path
 
 
 def find_video_files(directory: str) -> list[str]:

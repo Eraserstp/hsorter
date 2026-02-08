@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import shutil
 import colorsys
 import hashlib
 import html
@@ -286,6 +287,12 @@ class Database:
         )
         self.conn.commit()
 
+    # Обновление обложки тайтла.
+    def update_title_cover(self, title_id: int, cover_path: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute("UPDATE titles SET cover_path=? WHERE id=?", (cover_path, title_id))
+        self.conn.commit()
+
     # Получение карточки тайтла по id.
     def get_title(self, title_id: int):
         cur = self.conn.cursor()
@@ -367,6 +374,12 @@ class Database:
         )
         self.conn.commit()
 
+    # Обновление пути к медиафайлу.
+    def update_media_path(self, media_id: int, path: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute("UPDATE media SET path=? WHERE id=?", (path, media_id))
+        self.conn.commit()
+
     # Удаление медиафайла по id.
     def delete_media(self, media_id: int) -> None:
         cur = self.conn.cursor()
@@ -405,6 +418,12 @@ class Database:
             "INSERT INTO video_images (media_id, path, sort_order) VALUES (?,?,?)",
             (media_id, path, sort_order),
         )
+        self.conn.commit()
+
+    # Обновить путь изображения видеофайла.
+    def update_video_image_path(self, image_id: int, path: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute("UPDATE video_images SET path=? WHERE id=?", (path, image_id))
         self.conn.commit()
 
     # Удалить изображение видеофайла.
@@ -1036,6 +1055,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.current_title_id = title_id
         self.new_title_mode = False
         self.cover_path = title["cover_path"] or ""
+        cached_cover = self._cache_image(self.cover_path)
+        if cached_cover and cached_cover != self.cover_path:
+            self.cover_path = cached_cover
+            self.db.update_title_cover(title_id, cached_cover)
         self.main_title.set_text(title["main_title"])
         self.alt_titles.set_text(title["alt_titles"])
         self.rating_entry.set_text("" if title["rating"] is None else str(title["rating"]))
@@ -1283,7 +1306,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if dialog.run() == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
             if filename:
-                self.cover_path = filename
+                self.cover_path = self._cache_image(filename)
                 self._set_cover(self.cover_path)
                 self._mark_dirty()
         dialog.destroy()
@@ -1292,8 +1315,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def on_cover_drop(self, _widget, _context, _x, _y, data, _info, _time) -> None:
         path = self._first_path_from_drop(data)
         if path:
-            self.cover_path = path
-            self._set_cover(path)
+            self.cover_path = self._cache_image(path)
+            self._set_cover(self.cover_path)
             self._mark_dirty()
 
     def on_cover_double_click(self, _widget, event) -> None:
@@ -1323,17 +1346,24 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not self.current_title_id:
             return
         for item in self.db.list_media(self.current_title_id, "image"):
-            pixbuf = self._load_thumbnail(item["path"])
+            cached_path = self._cache_image(item["path"])
+            if cached_path and cached_path != item["path"]:
+                self.db.update_media_path(item["id"], cached_path)
+            pixbuf = self._load_thumbnail(cached_path)
             if pixbuf:
-                self.images_store.append([pixbuf, item["path"], item["id"], "image", item["id"]])
+                self.images_store.append(
+                    [pixbuf, cached_path, item["id"], "image", item["id"]]
+                )
         for item in self.db.list_media(self.current_title_id, "video"):
             text = os.path.basename(item["path"])
             if item["info"]:
                 text += f"\n  {item['info']}"
             self.videos_store.append([text, item["path"], item["id"]])
             if item["thumbnail_path"]:
-                thumb_path = item["thumbnail_path"]
-                if os.path.exists(thumb_path):
+                thumb_path = self._cache_image(item["thumbnail_path"])
+                if thumb_path and thumb_path != item["thumbnail_path"]:
+                    self.db.update_media_thumbnail(item["id"], thumb_path)
+                if thumb_path and os.path.exists(thumb_path):
                     pixbuf = self._load_thumbnail(thumb_path)
                     if pixbuf:
                         self.images_store.append(
@@ -1349,7 +1379,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
             return
         paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp"])
         for path in paths:
-            self.db.add_media(self.current_title_id, "image", path, "")
+            cached_path = self._cache_image(path)
+            self.db.add_media(self.current_title_id, "image", cached_path, "")
         self.refresh_media_lists()
 
     # Добавление видео с автоматическим чтением MediaInfo.
@@ -1368,7 +1399,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not self.current_title_id:
             return
         for path in self._extract_paths(data):
-            self.db.add_media(self.current_title_id, "image", path, "")
+            cached_path = self._cache_image(path)
+            self.db.add_media(self.current_title_id, "image", cached_path, "")
         self.refresh_media_lists()
 
     # Открыть изображение по клику на миниатюре.
@@ -1703,7 +1735,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         def set_thumbnail(path_value: str) -> None:
             nonlocal thumb_path
-            thumb_path = path_value
+            thumb_path = self._cache_image(path_value)
             if thumb_path and os.path.exists(thumb_path):
                 thumb_image.set_from_pixbuf(self._load_pixbuf(thumb_path))
 
@@ -1871,6 +1903,31 @@ class HSorterWindow(Gtk.ApplicationWindow):
         path_value = store.get_value(tree_iter, 1)
         self._open_default_if_exists(path_value)
 
+    def _cache_dir(self) -> str:
+        cache_dir = os.path.join(os.path.dirname(__file__), ".hsorter_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        return cache_dir
+
+    def _cache_image(self, path_value: str) -> str:
+        if not path_value or not os.path.exists(path_value):
+            return path_value
+        cache_dir = self._cache_dir()
+        abs_path = os.path.abspath(path_value)
+        try:
+            if os.path.commonpath([abs_path, cache_dir]) == cache_dir:
+                return abs_path
+        except ValueError:
+            pass
+        ext = os.path.splitext(abs_path)[1].lower() or ".img"
+        stat_info = os.stat(abs_path)
+        digest = hashlib.sha256(
+            f"{abs_path}|{stat_info.st_mtime_ns}|{stat_info.st_size}".encode("utf-8")
+        ).hexdigest()[:16]
+        cached_path = os.path.join(cache_dir, f"image_{digest}{ext}")
+        if not os.path.exists(cached_path):
+            shutil.copy2(abs_path, cached_path)
+        return cached_path
+
     def _pick_thumbnail_for_video(self, callback) -> None:
         dialog = Gtk.FileChooserDialog(
             title="Выберите изображение миниатюры",
@@ -1885,12 +1942,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if dialog.run() == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
             if filename:
-                callback(filename)
+                callback(self._cache_image(filename))
         dialog.destroy()
 
     def _generate_video_thumbnail(self, video_path: str, callback) -> None:
-        cache_dir = os.path.join(os.path.dirname(__file__), ".hsorter_cache")
-        os.makedirs(cache_dir, exist_ok=True)
+        cache_dir = self._cache_dir()
         output_path = os.path.join(
             cache_dir, f"thumb_{abs(hash(video_path)) % 100000}.jpg"
         )
@@ -2027,16 +2083,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _refresh_video_images(self, media_id: int, store: Gtk.ListStore) -> None:
         store.clear()
         for item in self.db.list_video_images(media_id):
-            pixbuf = self._load_thumbnail(item["path"])
+            cached_path = self._cache_image(item["path"])
+            if cached_path and cached_path != item["path"]:
+                self.db.update_video_image_path(item["id"], cached_path)
+            pixbuf = self._load_thumbnail(cached_path)
             if pixbuf:
-                store.append([pixbuf, item["path"], item["id"]])
+                store.append([pixbuf, cached_path, item["id"]])
 
     def _add_video_image(self, media_id: int, store: Gtk.ListStore) -> None:
         paths = self._pick_files(
             "Выберите изображения", ["image/png", "image/jpeg", "image/bmp"]
         )
         for path in paths:
-            self.db.add_video_image(media_id, path)
+            cached_path = self._cache_image(path)
+            self.db.add_video_image(media_id, cached_path)
         self._refresh_video_images(media_id, store)
 
     def _video_images_menu(
