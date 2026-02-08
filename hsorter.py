@@ -582,6 +582,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._load_window_settings()
         self.connect("destroy", self._save_window_settings)
         self.connect("configure-event", self._on_configure_event)
+        self.connect("window-state-event", self._on_window_state_event)
         self.refresh_titles()
 
     # Общая разметка: три колонки.
@@ -1771,19 +1772,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 self.right_paned.set_position(int(right_pos))
             except ValueError:
                 pass
-        state = self.db.get_setting("window_state")
-        if state == "maximized":
-            GLib.idle_add(self.maximize)
-        elif state == "minimized":
-            GLib.idle_add(self.iconify)
+        self._pending_window_state = self.db.get_setting("window_state")
         GLib.idle_add(self._clamp_panes)
 
     # Сохранение размеров окна и позиций разделителей.
     def _save_window_settings(self, *_args) -> None:
         width, height = self.get_size()
         self.db.set_setting("window_size", json.dumps([width, height]))
-        self.db.set_setting("main_paned_pos", str(self.main_paned.get_position()))
-        self.db.set_setting("right_paned_pos", str(self.right_paned.get_position()))
+        if not self.is_maximized():
+            self.db.set_setting("main_paned_pos", str(self.main_paned.get_position()))
+            self.db.set_setting("right_paned_pos", str(self.right_paned.get_position()))
         state = "normal"
         if self.is_maximized():
             state = "maximized"
@@ -1826,6 +1824,18 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._clamp_timeout_id = None
         self._clamp_panes()
         return False
+
+    # Применяем состояние окна после того, как окно создано.
+    def _on_window_state_event(self, *_args) -> None:
+        state = getattr(self, "_pending_window_state", None)
+        if not state:
+            return
+        self._pending_window_state = None
+        if state == "maximized":
+            self.maximize()
+        elif state == "minimized":
+            self.iconify()
+        GLib.idle_add(self._clamp_panes)
 
 
 # Приложение GTK.
