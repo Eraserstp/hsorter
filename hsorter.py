@@ -26,6 +26,7 @@ STATUS_OPTIONS = [
     "проблема озвучки",
     "дефекты видео",
     "известна лучшая версия",
+    "импортировано",
 ]
 
 
@@ -1002,8 +1003,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.episodes_spin.set_value(title["episodes"] or 0)
         self.duration_entry.set_text(title["total_duration"])
         self.url_entry.set_text(title["url"] or "")
-        self.created_at_label.set_text(title["created_at"] or "")
-        self.updated_at_label.set_text(title["updated_at"] or "")
+        self.created_at_label.set_text(self._format_date(title["created_at"]))
+        self.updated_at_label.set_text(self._format_date(title["updated_at"]))
         self.description_buffer.set_text(title["description"] or "")
         info_map = {
             "Страна": title["country"],
@@ -1088,6 +1089,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if not self.current_title_id:
                 self._message("Нет тайтла", "Выберите тайтл в списке.")
                 return
+            if not data.get("created_at"):
+                data["created_at"] = now
             data["updated_at"] = now
             self.db.update_title(self.current_title_id, data)
             self.refresh_titles()
@@ -1451,6 +1454,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not url.startswith(("http://", "https://")):
             url = f"https://{url}"
         Gio.AppInfo.launch_default_for_uri(url, None)
+
+    def _format_date(self, value: str | None) -> str:
+        if not value:
+            return ""
+        return value.split(" ")[0]
 
     # Реакция на изменение основного названия тайтла.
     def on_main_title_changed(self, _entry) -> None:
