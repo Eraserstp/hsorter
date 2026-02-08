@@ -1,3 +1,4 @@
+import argparse
 import datetime
 import json
 import os
@@ -10,15 +11,22 @@ VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".mpg", ".mpeg"}
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
-        print("Usage: python3 amc_import.py <amc.xml> [hsorter.sqlite]")
-        return 1
-    xml_path = os.path.abspath(sys.argv[1])
-    db_path = (
-        os.path.abspath(sys.argv[2])
-        if len(sys.argv) > 2
-        else os.path.join(os.path.dirname(__file__), "hsorter.sqlite")
+    parser = argparse.ArgumentParser(description="Import AMC XML into hsorter SQLite")
+    parser.add_argument("xml_path", help="Path to AMC XML export")
+    parser.add_argument(
+        "db_path",
+        nargs="?",
+        default=os.path.join(os.path.dirname(__file__), "hsorter.sqlite"),
+        help="Path to hsorter.sqlite (default: ./hsorter.sqlite)",
     )
+    parser.add_argument(
+        "--dubs",
+        action="store_true",
+        help="Write duplicate titles to dublicates.csv",
+    )
+    args = parser.parse_args()
+    xml_path = os.path.abspath(args.xml_path)
+    db_path = os.path.abspath(args.db_path)
     if not os.path.exists(xml_path):
         print(f"XML not found: {xml_path}")
         return 1
@@ -30,22 +38,30 @@ def main() -> int:
     conn.row_factory = sqlite3.Row
     imported = 0
     skipped = 0
+    duplicates = []
     for movie in root.findall(".//Movie"):
         data = extract_movie(movie, xml_dir)
         if not data["main_title"]:
             skipped += 1
             continue
         if title_exists(conn, data["main_title"]):
+            duplicates.append(data["main_title"])
+            print(f"Duplicate skipped: {data['main_title']}")
             skipped += 1
             continue
         title_id = insert_title(conn, data)
+        print(f"Imported: {data['main_title']}")
         for image_path in data["images"]:
             add_media(conn, title_id, "image", image_path, "")
         if data["video_files"]:
             for video_path in data["video_files"]:
                 add_media(conn, title_id, "video", video_path, "")
+        else:
+            print(f"Missing files: {data['main_title']}")
         imported += 1
     conn.close()
+    if args.dubs and duplicates:
+        write_duplicates(duplicates)
     print(f"Imported: {imported}, skipped: {skipped}")
     return 0
 
@@ -188,9 +204,11 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
     tags = ""
     censored = False
     episodes = None
+    fangroup = ""
     if custom_fields is not None:
         tags = (custom_fields.get("tags") or "").strip()
         censored = (custom_fields.get("censor") or "").lower() == "true"
+        fangroup = (custom_fields.get("fangroup") or "").strip()
         episodes_value = custom_fields.get("episodes")
         try:
             episodes = int(episodes_value) if episodes_value else None
@@ -210,6 +228,7 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
         video_files = find_video_files(os.path.dirname(video_file))
     else:
         status_json = json_status_absent()
+    status_json = merge_status_imported(status_json)
     images = []
     if cover_path:
         images.append(cover_path)
@@ -235,7 +254,6 @@ def extract_movie(movie: ET.Element, xml_dir: str) -> dict:
         "character_designer": "",
         "author": writer.strip(),
         "composer": "",
-        "subtitles_author": "",
         "voice_author": "",
         "title_comment": "",
         "url": url.strip(),
@@ -284,5 +302,22 @@ def json_status_absent() -> str:
     return json.dumps({"отсутствует": True}, ensure_ascii=False)
 
 
+def merge_status_imported(status_json: str) -> str:
+    try:
+        data = json.loads(status_json) if status_json else {}
+    except json.JSONDecodeError:
+        data = {}
+    data["импортировано"] = True
+    return json.dumps(data, ensure_ascii=False)
+
+
+def write_duplicates(duplicates: list[str]) -> None:
+    with open("dublicates.csv", "w", encoding="utf-8") as handle:
+        handle.write("title\n")
+        for title in sorted(set(duplicates)):
+            handle.write(f"{title}\n")
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
+        "subtitles_author": fangroup,
