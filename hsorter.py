@@ -595,9 +595,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.library_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.media_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        self.library_box.set_size_request(260, -1)
-        self.details_box.set_size_request(520, -1)
-        self.media_box.set_size_request(320, -1)
+        self.library_box.set_size_request(100, -1)
+        self.details_box.set_size_request(100, -1)
+        self.media_box.set_size_request(100, -1)
 
         self.main_paned.add1(self.library_box)
         self.right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -1797,9 +1797,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _clamp_panes(self) -> bool:
         allocation = self.get_allocation()
         total_width = allocation.width if allocation.width else self.get_size()[0]
-        min_left = 260
-        min_center = 520
-        min_right = 320
+        min_left = 100
+        min_center = 100
+        min_right = 100
         min_main = min_left
         min_right_pane_total = min_center + min_right
         max_main = max(min_main, total_width - min_right_pane_total)
