@@ -1364,7 +1364,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def on_video_tooltip(self, view, x, y, keyboard_mode, tooltip) -> bool:
         if keyboard_mode:
             return False
-        path = view.get_path_at_pos(x, y)
+        bin_x, bin_y = view.convert_widget_to_bin_window_coords(x, y)
+        path = view.get_path_at_pos(bin_x, bin_y)
         if path is None:
             return False
         _column = view.get_column(0)
