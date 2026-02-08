@@ -1362,10 +1362,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._open_video_details_dialog(media_id, media_path)
 
     def on_video_tooltip(self, view, x, y, keyboard_mode, tooltip) -> bool:
-        path_info = view.get_path_at_pos(x, y)
-        if not path_info:
+        if keyboard_mode:
             return False
-        path, _column, _cell_x, _cell_y = path_info
+        path = view.get_path_at_pos(x, y)
+        if path is None:
+            return False
+        _column = view.get_column(0)
         model = view.get_model()
         tree_iter = model.get_iter(path)
         media_id = model.get_value(tree_iter, 2)
