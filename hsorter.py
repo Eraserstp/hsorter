@@ -3,6 +3,9 @@ import json
 import os
 import sqlite3
 import subprocess
+import colorsys
+import hashlib
+import html
 
 import gi
 
@@ -577,6 +580,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.current_title_id = None
         self.cover_path = ""
         self.new_title_mode = False
+        self.status_colors = self._build_status_colors()
 
         self._build_ui()
         self._load_window_settings()
@@ -702,6 +706,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         status_popover.add(status_scroller)
         for status in STATUS_OPTIONS:
             check = Gtk.CheckButton(label=status)
+            check.set_use_markup(True)
+            check.set_label(self._format_status_label(status))
             self.status_checks[status] = check
             status_box.pack_start(check, False, False, 0)
         status_popover.show_all()
@@ -878,14 +884,19 @@ class HSorterWindow(Gtk.ApplicationWindow):
         )
         self.title_rows = []
         for title in titles:
-            display = title["main_title"]
+            display = html.escape(self._truncate_title(title["main_title"]))
             if self.show_status.get_active():
                 status_data = json.loads(title["status_json"] or "{}")
                 enabled = [s for s, v in status_data.items() if v]
                 if enabled:
-                    display += f"\n  {'; '.join(enabled)}"
+                    status_markup = "; ".join(
+                        [self._format_status_span(status) for status in enabled]
+                    )
+                    display += f"\n  <span size='small'>{status_markup}</span>"
             row = Gtk.ListBoxRow()
-            row.add(Gtk.Label(label=display, xalign=0))
+            label = Gtk.Label(label=display, xalign=0)
+            label.set_use_markup(True)
+            row.add(label)
             self.title_list.add(row)
             self.title_rows.append(title["id"])
         self.title_list.show_all()
@@ -1281,6 +1292,29 @@ class HSorterWindow(Gtk.ApplicationWindow):
         media_ids = [row[2] for row in model if row[2] is not None]
         if media_ids:
             self.db.update_media_order(media_ids)
+
+    def _truncate_title(self, title: str) -> str:
+        if len(title) <= 32:
+            return title
+        return f"{title[:29]}..."
+
+    def _build_status_colors(self) -> dict:
+        colors = {}
+        for status in STATUS_OPTIONS:
+            digest = hashlib.md5(status.encode("utf-8")).hexdigest()
+            hue = int(digest[:8], 16) / 0xFFFFFFFF
+            saturation = 0.55
+            lightness = 0.5
+            r, g, b = colorsys.hls_to_rgb(hue, lightness, saturation)
+            colors[status] = f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+        return colors
+
+    def _format_status_span(self, status: str) -> str:
+        color = self.status_colors.get(status, "#000000")
+        return f"<span foreground='{color}'>{html.escape(status)}</span>"
+
+    def _format_status_label(self, status: str) -> str:
+        return self._format_status_span(status)
 
     # Реакция на изменение основного названия тайтла.
     def on_main_title_changed(self, _entry) -> None:
