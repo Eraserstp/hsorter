@@ -9,7 +9,7 @@ import gi
 # Требуем конкретные версии GTK/GDK для корректной работы
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GdkPixbuf, Gio, Gtk
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
 
 
 # Базовый набор статусов качества, который может быть расширен позже.
@@ -594,6 +594,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.library_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.media_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.library_box.set_size_request(260, -1)
+        self.details_box.set_size_request(520, -1)
+        self.media_box.set_size_request(320, -1)
 
         self.main_paned.add1(self.library_box)
         self.right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
@@ -1767,6 +1770,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 self.right_paned.set_position(int(right_pos))
             except ValueError:
                 pass
+        state = self.db.get_setting("window_state")
+        if state == "maximized":
+            GLib.idle_add(self.maximize)
+        elif state == "minimized":
+            GLib.idle_add(self.iconify)
+        GLib.idle_add(self._clamp_panes)
 
     # Сохранение размеров окна и позиций разделителей.
     def _save_window_settings(self, *_args) -> None:
@@ -1774,6 +1783,36 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.db.set_setting("window_size", json.dumps([width, height]))
         self.db.set_setting("main_paned_pos", str(self.main_paned.get_position()))
         self.db.set_setting("right_paned_pos", str(self.right_paned.get_position()))
+        state = "normal"
+        if self.is_maximized():
+            state = "maximized"
+        else:
+            window = self.get_window()
+            if window and window.get_state() & Gdk.WindowState.ICONIFIED:
+                state = "minimized"
+        self.db.set_setting("window_state", state)
+
+    # Ограничиваем позиции разделителей, чтобы элементы не сжимались слишком сильно.
+    def _clamp_panes(self) -> bool:
+        total_width, _ = self.get_size()
+        min_left = 260
+        min_center = 520
+        min_right = 320
+        min_main = min_left
+        min_right_pane_total = min_center + min_right
+        max_main = max(min_main, total_width - min_right_pane_total)
+        main_pos = self.main_paned.get_position()
+        clamped_main = max(min_main, min(max_main, main_pos))
+        if clamped_main != main_pos:
+            self.main_paned.set_position(clamped_main)
+        right_total = total_width - clamped_main
+        min_right_pos = min_center
+        max_right_pos = max(min_right_pos, right_total - min_right)
+        right_pos = self.right_paned.get_position()
+        clamped_right = max(min_right_pos, min(max_right_pos, right_pos))
+        if clamped_right != right_pos:
+            self.right_paned.set_position(clamped_right)
+        return False
 
 
 # Приложение GTK.
