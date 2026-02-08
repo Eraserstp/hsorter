@@ -1365,10 +1365,15 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if keyboard_mode:
             return False
         bin_x, bin_y = view.convert_widget_to_bin_window_coords(x, y)
-        path = view.get_path_at_pos(bin_x, bin_y)
-        if path is None:
+        path_info = view.get_path_at_pos(bin_x, bin_y)
+        if not path_info:
             return False
-        _column = view.get_column(0)
+        if isinstance(path_info, tuple):
+            path = path_info[0]
+            _column = path_info[1]
+        else:
+            path = path_info
+            _column = view.get_column(0)
         model = view.get_model()
         tree_iter = model.get_iter(path)
         media_id = model.get_value(tree_iter, 2)
