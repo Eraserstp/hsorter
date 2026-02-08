@@ -1761,13 +1761,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
         output_path = os.path.join(
             cache_dir, f"thumb_{abs(hash(video_path)) % 100000}.jpg"
         )
+        duration = self._get_video_duration(video_path)
+        step = max(duration / 20, 1.0) if duration else None
+        if step:
+            select_expr = f"isnan(prev_selected_t)+gte(t,prev_selected_t+{step})"
+            vf = f"select='{select_expr}',scale=360:-1,tile=4x5:padding=4:margin=4"
+        else:
+            vf = "fps=1/10,scale=360:-1,tile=4x5:padding=4:margin=4"
         cmd = [
             "ffmpeg",
             "-y",
             "-i",
             video_path,
             "-vf",
-            "fps=1/10,scale=360:-1,tile=4x5:padding=4:margin=4",
+            vf,
             "-frames:v",
             "1",
             output_path,
@@ -1775,6 +1782,33 @@ class HSorterWindow(Gtk.ApplicationWindow):
         subprocess.run(cmd, check=False)
         if os.path.exists(output_path):
             callback(output_path)
+
+    def _get_video_duration(self, video_path: str) -> float | None:
+        """Возвращает длительность видео в секундах через ffprobe."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    video_path,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            return float(result.stdout.strip())
+        except ValueError:
+            return None
 
     def _populate_tracks_store(self, store: Gtk.ListStore, media_id: int, path: str) -> None:
         store.clear()
