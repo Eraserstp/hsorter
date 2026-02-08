@@ -374,6 +374,12 @@ class Database:
         )
         self.conn.commit()
 
+    # Обновление описания медиафайла.
+    def update_media_info(self, media_id: int, info: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute("UPDATE media SET info=? WHERE id=?", (info, media_id))
+        self.conn.commit()
+
     # Обновление пути к медиафайлу.
     def update_media_path(self, media_id: int, path: str) -> None:
         cur = self.conn.cursor()
@@ -503,39 +509,44 @@ class MediaInfo:
         """Короткое описание (для списка видео)."""
         if os.path.isdir(path):
             return ""
-        info = MediaInfo._from_pymediainfo(path)
-        if info:
-            return info
-        return MediaInfo._from_cli(path)
+        size_bytes = None
+        if os.path.exists(path):
+            try:
+                size_bytes = os.path.getsize(path)
+            except OSError:
+                size_bytes = None
+        info = MediaInfo._summary_from_pymediainfo(path)
+        if not info:
+            info = MediaInfo._summary_from_cli(path)
+        if not info:
+            return MediaInfo._format_size(size_bytes)
+        return MediaInfo._format_summary(info, size_bytes)
 
     @staticmethod
     # Извлечение через библиотеку pymediainfo, если она установлена.
-    def _from_pymediainfo(path: str) -> str:
+    def _summary_from_pymediainfo(path: str) -> dict:
         try:
             from pymediainfo import MediaInfo as PyMediaInfo
         except Exception:
-            return ""
+            return {}
         try:
             media_info = PyMediaInfo.parse(path)
         except Exception:
-            return ""
-        parts = []
+            return {}
+        summary = {"video_format": "", "width": "", "height": "", "audio_format": ""}
         for track in media_info.tracks:
             if track.track_type == "Video":
-                parts.append(
-                    f"Видео: {track.format or ''} {track.width or ''}x{track.height or ''}"
-                )
+                summary["video_format"] = track.format or ""
+                summary["width"] = track.width or ""
+                summary["height"] = track.height or ""
             if track.track_type == "Audio":
-                lang = track.language or ""
-                parts.append(f"Аудио: {track.format or ''} {lang}")
-            if track.track_type == "Text":
-                lang = track.language or ""
-                parts.append(f"Субтитры: {track.format or ''} {lang}")
-        return " | ".join([p.strip() for p in parts if p.strip()])
+                summary["audio_format"] = track.format or ""
+                break
+        return summary
 
     @staticmethod
     # Извлечение через CLI mediainfo (JSON).
-    def _from_cli(path: str) -> str:
+    def _summary_from_cli(path: str) -> dict:
         try:
             result = subprocess.run(
                 ["mediainfo", "--Output=JSON", path],
@@ -544,30 +555,56 @@ class MediaInfo:
                 text=True,
             )
         except FileNotFoundError:
-            return ""
+            return {}
         if result.returncode != 0:
-            return ""
+            return {}
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError:
-            return ""
+            return {}
         tracks = data.get("media", {}).get("track", [])
-        parts = []
+        summary = {"video_format": "", "width": "", "height": "", "audio_format": ""}
         for track in tracks:
             track_type = track.get("@type")
             if track_type == "Video":
-                parts.append(
-                    f"Видео: {track.get('Format', '')} {track.get('Width', '')}x{track.get('Height', '')}"
-                )
+                summary["video_format"] = track.get("Format", "") or ""
+                summary["width"] = track.get("Width", "") or ""
+                summary["height"] = track.get("Height", "") or ""
             if track_type == "Audio":
-                parts.append(
-                    f"Аудио: {track.get('Format', '')} {track.get('Language', '')}"
-                )
-            if track_type == "Text":
-                parts.append(
-                    f"Субтитры: {track.get('Format', '')} {track.get('Language', '')}"
-                )
-        return " | ".join([p.strip() for p in parts if p.strip()])
+                summary["audio_format"] = track.get("Format", "") or ""
+                break
+        return summary
+
+    @staticmethod
+    def _format_summary(summary: dict, size_bytes: int | None) -> str:
+        parts = []
+        width = summary.get("width")
+        height = summary.get("height")
+        if width and height:
+            parts.append(f"{width}x{height}")
+        video_format = summary.get("video_format")
+        if video_format:
+            parts.append(f"Видео: {video_format}")
+        audio_format = summary.get("audio_format")
+        if audio_format:
+            parts.append(f"Аудио: {audio_format}")
+        size_value = MediaInfo._format_size(size_bytes)
+        if size_value:
+            parts.append(f"Размер: {size_value}")
+        return " | ".join(parts)
+
+    @staticmethod
+    def _format_size(size_bytes: int | None) -> str:
+        if not size_bytes:
+            return ""
+        size = float(size_bytes)
+        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if size < 1024 or unit == "ТБ":
+                if unit == "Б":
+                    return f"{int(size)} {unit}"
+                return f"{size:.1f} {unit}"
+            size /= 1024
+        return ""
 
     # Получаем подробную структуру из mediainfo в виде словаря.
     @staticmethod
@@ -960,7 +997,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.videos_store = Gtk.ListStore(str, str, int)
         self.videos_view = Gtk.TreeView(model=self.videos_store)
         renderer = Gtk.CellRendererText()
-        column = Gtk.TreeViewColumn("Видео", renderer, text=0)
+        renderer.set_property("markup", True)
+        column = Gtk.TreeViewColumn("Видео", renderer, markup=0)
         self.videos_view.append_column(column)
         self.videos_view.set_reorderable(True)
         self.videos_view.connect("button-press-event", self.on_videos_menu)
@@ -1355,9 +1393,17 @@ class HSorterWindow(Gtk.ApplicationWindow):
                     [pixbuf, cached_path, item["id"], "image", item["id"]]
                 )
         for item in self.db.list_media(self.current_title_id, "video"):
-            text = os.path.basename(item["path"])
-            if item["info"]:
-                text += f"\n  {item['info']}"
+            filename = os.path.basename(item["path"])
+            info_value = item["info"] or ""
+            if item["path"] and (not info_value or "Размер:" not in info_value):
+                info_value = MediaInfo.describe_video(item["path"])
+                if info_value:
+                    self.db.update_media_info(item["id"], info_value)
+            if info_value:
+                info_markup = f"\n<span size='smaller'>{html.escape(info_value)}</span>"
+            else:
+                info_markup = ""
+            text = f"{html.escape(filename)}{info_markup}"
             self.videos_store.append([text, item["path"], item["id"]])
             if item["thumbnail_path"]:
                 thumb_path = self._cache_image(item["thumbnail_path"])
