@@ -194,8 +194,8 @@ class Database:
             (
                 data.get("main_title", ""),
                 data.get("alt_titles", ""),
-                data.get("rating", 1),
-                data.get("personal_rating", 1),
+                data.get("rating"),
+                data.get("personal_rating"),
                 1 if data.get("censored") else 0,
                 data.get("year_start"),
                 data.get("year_end"),
@@ -258,8 +258,8 @@ class Database:
             (
                 data.get("main_title", ""),
                 data.get("alt_titles", ""),
-                data.get("rating", 1),
-                data.get("personal_rating", 1),
+                data.get("rating"),
+                data.get("personal_rating"),
                 1 if data.get("censored") else 0,
                 data.get("year_start"),
                 data.get("year_end"),
@@ -355,6 +355,15 @@ class Database:
         cur.execute(
             "UPDATE media SET thumbnail_path=?, comment=? WHERE id=?",
             (thumbnail_path, comment, media_id),
+        )
+        self.conn.commit()
+
+    # Обновление только миниатюры видео.
+    def update_media_thumbnail(self, media_id: int, thumbnail_path: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE media SET thumbnail_path=? WHERE id=?",
+            (thumbnail_path, media_id),
         )
         self.conn.commit()
 
@@ -625,10 +634,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.cover_path = ""
         self.new_title_mode = False
         self.status_colors = self._build_status_colors()
+        self.is_dirty = False
+        self.created_at_value = ""
+        self.updated_at_value = ""
 
         self._build_ui()
         self._load_window_settings()
         self.connect("destroy", self._save_window_settings)
+        self.connect("delete-event", self._on_delete_event)
         self.connect("configure-event", self._on_configure_event)
         self.connect("window-state-event", self._on_window_state_event)
         self.refresh_titles()
@@ -717,10 +730,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         cover_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self.cover_image = Gtk.Image()
         self.cover_image.set_size_request(240, 240)
+        self.cover_event = Gtk.EventBox()
+        self.cover_event.add(self.cover_image)
+        self.cover_event.connect("button-press-event", self.on_cover_double_click)
         self.cover_button = Gtk.Button(label="Загрузить изображение")
         self.cover_button.connect("clicked", lambda _b: self.pick_cover())
         cover_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        cover_column.pack_start(self.cover_image, False, False, 0)
+        cover_column.pack_start(self.cover_event, False, False, 0)
         cover_column.pack_start(self.cover_button, False, False, 0)
         cover_row.pack_start(cover_column, False, False, 0)
 
@@ -728,6 +744,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.main_title = Gtk.Entry()
         self.main_title.connect("changed", self.on_main_title_changed)
         self.alt_titles = Gtk.Entry()
+        self.alt_titles.connect("changed", lambda _e: self._mark_dirty())
         title_column.pack_start(self._row("Основное название", self.main_title), False, False, 0)
         self.name_warning_label = Gtk.Label(label="")
         self.name_warning_label.set_xalign(0)
@@ -755,6 +772,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         status_popover.add(status_scroller)
         for status in STATUS_OPTIONS:
             check = self._build_status_check(status)
+            check.connect("toggled", lambda _e: self._mark_dirty())
             self.status_checks[status] = check
             status_box.pack_start(check, False, False, 0)
         status_popover.show_all()
@@ -766,6 +784,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.rating_entry = Gtk.Entry()
         self.personal_rating_entry = Gtk.Entry()
         self.censored_check = Gtk.CheckButton(label="Цензура")
+        self.rating_entry.connect("changed", lambda _e: self._mark_dirty())
+        self.personal_rating_entry.connect("changed", lambda _e: self._mark_dirty())
+        self.censored_check.connect("toggled", lambda _e: self._mark_dirty())
         rating_row.pack_start(self._row("Рейтинг", self.rating_entry), True, True, 0)
         rating_row.pack_start(
             self._row("Личный рейтинг", self.personal_rating_entry), True, True, 0
@@ -783,6 +804,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.year_end.connect("changed", self.on_year_end_changed)
         self.episodes_spin = Gtk.SpinButton.new_with_range(0, 10000, 1)
         self.duration_entry = Gtk.Entry()
+        self.episodes_spin.connect("value-changed", lambda _e: self._mark_dirty())
+        self.duration_entry.connect("changed", lambda _e: self._mark_dirty())
         year_row.pack_start(self._row("Год начала", self.year_start), True, True, 0)
         year_row.pack_start(self._row("Год окончания", self.year_end), True, True, 0)
         year_row.pack_start(self._row("Эпизоды", self.episodes_spin), True, True, 0)
@@ -793,6 +816,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.url_entry = Gtk.Entry()
         open_url_button = Gtk.Button(label="Открыть ссылку")
         open_url_button.connect("clicked", lambda _b: self.open_title_url())
+        self.url_entry.connect("changed", lambda _e: self._mark_dirty())
         url_row.pack_start(self._row("URL", self.url_entry), True, True, 0)
         url_row.pack_start(open_url_button, False, False, 0)
         self.details_box.pack_start(url_row, False, False, 0)
@@ -809,6 +833,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.description_buffer = Gtk.TextBuffer()
         description_view = Gtk.TextView(buffer=self.description_buffer)
         description_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.description_buffer.connect("changed", lambda _b: self._mark_dirty())
         description_scroller = Gtk.ScrolledWindow()
         description_scroller.set_vexpand(True)
         description_scroller.add(description_view)
@@ -837,6 +862,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         ]
         for idx, label in enumerate(labels):
             entry = Gtk.Entry()
+            entry.connect("changed", lambda _e: self._mark_dirty())
             self.info_entries[label] = entry
             info_grid.attach(Gtk.Label(label=label, xalign=0), 0, idx, 1, 1)
             info_grid.attach(entry, 1, idx, 1, 1)
@@ -844,6 +870,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.title_comment_buffer = Gtk.TextBuffer()
         comment_view = Gtk.TextView(buffer=self.title_comment_buffer)
         comment_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        self.title_comment_buffer.connect("changed", lambda _b: self._mark_dirty())
         comment_scroller = Gtk.ScrolledWindow()
         comment_scroller.set_size_request(240, 160)
         comment_scroller.set_vexpand(True)
@@ -858,6 +885,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         tags_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.tags_entry = Gtk.Entry()
+        self.tags_entry.connect("changed", lambda _e: self._mark_dirty())
         add_tag = Gtk.Button(label="Добавить тег")
         add_tag.connect("clicked", lambda _b: self.add_tag())
         tags_row.pack_start(self.tags_entry, True, True, 0)
@@ -881,7 +909,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         images_box.set_margin_end(6)
         images_frame.add(images_box)
         # Список изображений в виде миниатюр (thumbnails).
-        self.images_store = Gtk.ListStore(GdkPixbuf.Pixbuf, str, int)
+        self.images_store = Gtk.ListStore(GdkPixbuf.Pixbuf, str, int, str, int)
         self.images_view = Gtk.IconView.new()
         self.images_view.set_model(self.images_store)
         self.images_view.set_pixbuf_column(0)
@@ -989,6 +1017,15 @@ class HSorterWindow(Gtk.ApplicationWindow):
             return
         index = row.get_index()
         title_id = self.title_rows[index]
+        if self.is_dirty:
+            choice = self._prompt_unsaved("перейти к другому тайтлу")
+            if choice == "save":
+                if not self.save_title():
+                    self._select_current_title_in_list()
+                    return
+            elif choice == "cancel":
+                self._select_current_title_in_list()
+                return
         self.load_title(title_id)
 
     # Загрузка данных тайтла в форму.
@@ -1011,8 +1048,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.episodes_spin.set_value(title["episodes"] or 0)
         self.duration_entry.set_text(title["total_duration"])
         self.url_entry.set_text(title["url"] or "")
-        self.created_at_label.set_text(self._format_date(title["created_at"]))
-        self.updated_at_label.set_text(self._format_date(title["updated_at"]))
+        self.created_at_value = title["created_at"] or ""
+        self.updated_at_value = title["updated_at"] or ""
+        self.created_at_label.set_text(self._format_date(self.created_at_value))
+        self.updated_at_label.set_text(self._format_date(self.updated_at_value))
         self.description_buffer.set_text(title["description"] or "")
         info_map = {
             "Страна": title["country"],
@@ -1034,6 +1073,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._set_cover(self.cover_path)
         self.refresh_media_lists()
         self._update_save_state()
+        self._clear_dirty()
 
     # Установка изображения обложки.
     def _set_cover(self, path: str) -> None:
@@ -1074,6 +1114,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Добавить новый тайтл.
     def add_title(self) -> None:
+        if self.is_dirty:
+            choice = self._prompt_unsaved("создать новый тайтл")
+            if choice == "save":
+                if not self.save_title():
+                    return
+            elif choice == "cancel":
+                return
         self.new_title_mode = True
         self.current_title_id = None
         self.clear_form()
@@ -1081,14 +1128,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._update_save_state()
 
     # Сохранить изменения.
-    def save_title(self) -> None:
+    def save_title(self) -> bool:
         if not self._update_save_state():
-            return
+            return False
         data = self.collect_form_data()
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         if self.new_title_mode:
-            data["created_at"] = now
-            data["updated_at"] = now
+            self.created_at_value = now
+            self.updated_at_value = now
+            data["created_at"] = self.created_at_value
+            data["updated_at"] = self.updated_at_value
             title_id = self.db.add_title(data)
             self.new_title_mode = False
             self.refresh_titles()
@@ -1096,12 +1145,18 @@ class HSorterWindow(Gtk.ApplicationWindow):
         else:
             if not self.current_title_id:
                 self._message("Нет тайтла", "Выберите тайтл в списке.")
-                return
-            if not data.get("created_at"):
-                data["created_at"] = now
-            data["updated_at"] = now
+                return False
+            if not self.created_at_value:
+                self.created_at_value = now
+            self.updated_at_value = now
+            data["created_at"] = self.created_at_value
+            data["updated_at"] = self.updated_at_value
             self.db.update_title(self.current_title_id, data)
             self.refresh_titles()
+            self.created_at_label.set_text(self._format_date(self.created_at_value))
+            self.updated_at_label.set_text(self._format_date(self.updated_at_value))
+        self._clear_dirty()
+        return True
 
     # Удалить выбранный тайтл.
     def delete_title(self) -> None:
@@ -1151,8 +1206,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "status": status_data,
             "tags": self.tags_entry.get_text().strip(),
             "cover_path": self.cover_path,
-            "created_at": self.created_at_label.get_text(),
-            "updated_at": self.updated_at_label.get_text(),
+            "created_at": self.created_at_value,
+            "updated_at": self.updated_at_value,
         }
 
     # Очистить форму, если тайтл удалён или не выбран.
@@ -1174,6 +1229,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.url_entry.set_text("")
         self.created_at_label.set_text("")
         self.updated_at_label.set_text("")
+        self.created_at_value = ""
+        self.updated_at_value = ""
         for check in self.status_checks.values():
             check.set_active(False)
         self.tags_entry.set_text("")
@@ -1183,6 +1240,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.videos_store.clear()
         self.name_warning_label.set_text("")
         self.save_button.set_sensitive(False)
+        self._clear_dirty()
 
     # Добавление тега через диалог.
     def add_tag(self) -> None:
@@ -1206,6 +1264,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.tags_entry.set_text(", ".join(sorted(set(tags))))
         else:
             self.tags_entry.set_text(new_tag)
+        self._mark_dirty()
 
     # Выбор обложки через файловый диалог.
     def pick_cover(self) -> None:
@@ -1226,6 +1285,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if filename:
                 self.cover_path = filename
                 self._set_cover(self.cover_path)
+                self._mark_dirty()
         dialog.destroy()
 
     # Обработка drop для обложки.
@@ -1234,6 +1294,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if path:
             self.cover_path = path
             self._set_cover(path)
+            self._mark_dirty()
+
+    def on_cover_double_click(self, _widget, event) -> None:
+        if event.type == Gdk.EventType.DOUBLE_BUTTON_PRESS:
+            self._open_default_if_exists(self.cover_path)
 
     # Возвращает первый путь из drag-and-drop.
     def _first_path_from_drop(self, data: Gtk.SelectionData) -> str:
@@ -1260,12 +1325,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
         for item in self.db.list_media(self.current_title_id, "image"):
             pixbuf = self._load_thumbnail(item["path"])
             if pixbuf:
-                self.images_store.append([pixbuf, item["path"], item["id"]])
+                self.images_store.append([pixbuf, item["path"], item["id"], "image", item["id"]])
         for item in self.db.list_media(self.current_title_id, "video"):
             text = os.path.basename(item["path"])
             if item["info"]:
                 text += f"\n  {item['info']}"
             self.videos_store.append([text, item["path"], item["id"]])
+            if item["thumbnail_path"]:
+                thumb_path = item["thumbnail_path"]
+                if os.path.exists(thumb_path):
+                    pixbuf = self._load_thumbnail(thumb_path)
+                    if pixbuf:
+                        self.images_store.append(
+                            [pixbuf, thumb_path, None, "video_thumbnail", item["id"]]
+                        )
         self.images_view.show_all()
         self.videos_view.show_all()
 
@@ -1328,9 +1401,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not paths:
             return
         tree_iter = self.images_store.get_iter(paths[0])
-        media_id = self.images_store.get_value(tree_iter, 2)
-        if media_id:
-            self.db.delete_media(media_id)
+        source_type = self.images_store.get_value(tree_iter, 3)
+        source_id = self.images_store.get_value(tree_iter, 4)
+        if source_type == "image" and source_id:
+            self.db.delete_media(source_id)
+            self.refresh_media_lists()
+        elif source_type == "video_thumbnail" and source_id:
+            self.db.update_media_thumbnail(source_id, "")
             self.refresh_media_lists()
 
     # Сохранение порядка изображений после drag-and-drop.
@@ -1448,12 +1525,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
         end_year = self._parse_optional_int(end_year_text)
         if end_year is None or start_year > end_year:
             self.year_end.set_text(str(start_year))
+        self._mark_dirty()
 
     def on_year_end_changed(self, _entry) -> None:
         start_year = int(self.year_start.get_value())
         end_year = self._parse_optional_int(self.year_end.get_text().strip())
         if end_year is None or start_year > end_year:
             self.year_end.set_text(str(start_year))
+        self._mark_dirty()
 
     def open_title_url(self) -> None:
         url = self.url_entry.get_text().strip()
@@ -1470,6 +1549,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Реакция на изменение основного названия тайтла.
     def on_main_title_changed(self, _entry) -> None:
+        self._mark_dirty()
         self._update_save_state()
 
     # Обновляем доступность кнопки сохранения и сообщение об ошибке.
@@ -1489,6 +1569,58 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.name_warning_label.set_text("")
         self.save_button.set_sensitive(True)
         return True
+
+    def _mark_dirty(self) -> None:
+        if not self.is_dirty:
+            self.is_dirty = True
+
+    def _clear_dirty(self) -> None:
+        self.is_dirty = False
+
+    def _prompt_unsaved(self, action: str) -> str:
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.NONE,
+            text="Есть несохраненные изменения.",
+        )
+        dialog.format_secondary_text(
+            f"Сохранить изменения перед тем как {action}?"
+        )
+        dialog.add_button("Сохранить", Gtk.ResponseType.YES)
+        dialog.add_button("Не сохранять", Gtk.ResponseType.NO)
+        dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
+        response = dialog.run()
+        dialog.destroy()
+        if response == Gtk.ResponseType.YES:
+            return "save"
+        if response == Gtk.ResponseType.NO:
+            return "discard"
+        return "cancel"
+
+    def _select_current_title_in_list(self) -> None:
+        if not self.current_title_id:
+            return
+        if not hasattr(self, "title_rows"):
+            return
+        try:
+            index = self.title_rows.index(self.current_title_id)
+        except ValueError:
+            return
+        row = self.title_list.get_row_at_index(index)
+        if row:
+            self.title_list.select_row(row)
+
+    def _on_delete_event(self, *_args) -> bool:
+        if self.is_dirty:
+            choice = self._prompt_unsaved("закрыть приложение")
+            if choice == "save":
+                if not self.save_title():
+                    return True
+            elif choice == "cancel":
+                return True
+        return False
 
     # Диалог выбора нескольких файлов.
     def _pick_files(self, title: str, mime_types: list) -> list:
@@ -1720,6 +1852,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             ).strip(),
         )
         dialog.destroy()
+        self.refresh_media_lists()
 
     def _get_media_row(self, media_id: int):
         cur = self.db.conn.cursor()
@@ -1983,6 +2116,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
             except (TypeError, ValueError, json.JSONDecodeError):
                 pass
         self._pending_window_state = self.db.get_setting("window_state")
+        show_status = self.db.get_setting("list_show_status")
+        if show_status is not None:
+            self.show_status.set_active(show_status == "1")
+        sort_value = self.db.get_setting("list_sort")
+        if sort_value:
+            self.filter_sort.set_active_id(sort_value)
         pos_value = self.db.get_setting("window_position")
         if pos_value:
             try:
@@ -1998,6 +2137,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.db.set_setting("window_size", json.dumps([width, height]))
         allocation = self.get_allocation()
         self.db.set_setting("window_position", json.dumps([allocation.x, allocation.y]))
+        self.db.set_setting("list_show_status", "1" if self.show_status.get_active() else "0")
+        self.db.set_setting("list_sort", self.filter_sort.get_active_id() or "title")
         state = "normal"
         if self.is_maximized():
             state = "maximized"
