@@ -1673,7 +1673,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _extract_anidb_id(self, url: str) -> str | None:
         if not url:
             return None
-        match = re.search(r"anidb\\.net/anime/(\\d+)", url)
+        match = re.search(r"anidb\.net/anime/(\d+)", url)
         return match.group(1) if match else None
 
     def _update_sync_button(self) -> None:
