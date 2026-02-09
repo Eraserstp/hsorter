@@ -1776,7 +1776,18 @@ class HSorterWindow(Gtk.ApplicationWindow):
         except Exception as exc:
             self._message("AniDB", f"Ошибка запроса AniDB: {exc}")
             return None
-        return self._anidb_xml_to_title_data(response_xml, anime_id)
+        cleaned = response_xml.lstrip()
+        if not cleaned.startswith("<"):
+            self._message(
+                "AniDB",
+                "Ответ AniDB не является XML. Проверьте логин/пароль и доступ к API.",
+            )
+            return None
+        try:
+            return self._anidb_xml_to_title_data(cleaned, anime_id)
+        except ET.ParseError as exc:
+            self._message("AniDB", f"Ошибка разбора XML: {exc}")
+            return None
 
     def _anidb_http_request(self, request_name: str, params: dict) -> str:
         base_url = "http://api.anidb.net:9001/httpapi"
@@ -1793,7 +1804,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         return content.decode("utf-8", errors="replace")
 
     def _anidb_xml_to_title_data(self, xml_text: str, anime_id: str) -> dict:
-        root = ET.fromstring(xml_text)
+        root = ET.fromstring(xml_text.strip())
         anime_node = root if root.tag == "anime" else root.find("anime")
         if anime_node is None:
             raise ValueError("Ответ AniDB не содержит данных anime.")
