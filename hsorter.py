@@ -11,13 +11,10 @@ import hashlib
 import html
 
 import gi
-import importlib.util
 import re
-from typing import Any
-
-adbb = None
-if importlib.util.find_spec("adbb") is not None:
-    import adbb
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 
 # Требуем конкретные версии GTK/GDK для корректной работы
 gi.require_version("Gtk", "3.0")
@@ -1719,8 +1716,6 @@ class HSorterWindow(Gtk.ApplicationWindow):
         return {
             "username": self.db.get_setting("anidb_username") or "",
             "password": self.db.get_setting("anidb_password") or "",
-            "client": self.db.get_setting("anidb_client") or "",
-            "client_version": self.db.get_setting("anidb_client_version") or "",
         }
 
     def open_settings_dialog(self) -> None:
@@ -1742,19 +1737,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         username_entry = Gtk.Entry()
         password_entry = Gtk.Entry()
         password_entry.set_visibility(False)
-        client_entry = Gtk.Entry()
-        client_version_entry = Gtk.Entry()
         settings = self._get_anidb_settings()
         username_entry.set_text(settings["username"])
         password_entry.set_text(settings["password"])
-        client_entry.set_text(settings["client"])
-        client_version_entry.set_text(settings["client_version"])
 
         labels = [
             ("Логин", username_entry),
             ("Пароль", password_entry),
-            ("Client", client_entry),
-            ("Client version", client_version_entry),
         ]
         for idx, (label, entry) in enumerate(labels):
             grid.attach(Gtk.Label(label=label, xalign=0), 0, idx, 1, 1)
@@ -1767,82 +1756,95 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if response == Gtk.ResponseType.OK:
             self.db.set_setting("anidb_username", username_entry.get_text().strip())
             self.db.set_setting("anidb_password", password_entry.get_text())
-            self.db.set_setting("anidb_client", client_entry.get_text().strip())
-            self.db.set_setting("anidb_client_version", client_version_entry.get_text().strip())
         dialog.destroy()
 
     def _fetch_anidb_data(self, anime_id: str) -> dict | None:
-        if adbb is None:
-            self._message("AniDB", "Библиотека adbb не установлена.")
-            return None
         settings = self._get_anidb_settings()
         missing = [key for key, value in settings.items() if not value]
         if missing:
             self._message("AniDB", "Заполните настройки AniDB в настройках приложения.")
             return None
         try:
-            if hasattr(adbb, "init"):
-                adbb.init(
-                    username=settings["username"],
-                    password=settings["password"],
-                    client=settings["client"],
-                    clientver=int(settings["client_version"] or 0),
-                )
-        except Exception as exc:
-            self._message("AniDB", f"Ошибка инициализации: {exc}")
-            return None
-        try:
-            if hasattr(adbb, "Anime"):
-                anime = adbb.Anime(int(anime_id))
-            elif hasattr(adbb, "get_anime"):
-                anime = adbb.get_anime(int(anime_id))
-            else:
-                self._message("AniDB", "Не удалось найти API AniDB в библиотеке adbb.")
-                return None
+            response_xml = self._anidb_http_request(
+                "anime",
+                {
+                    "aid": anime_id,
+                    "user": settings["username"],
+                    "pass": settings["password"],
+                },
+            )
         except Exception as exc:
             self._message("AniDB", f"Ошибка запроса AniDB: {exc}")
             return None
-        return self._anidb_to_title_data(anime, anime_id)
+        return self._anidb_xml_to_title_data(response_xml, anime_id)
 
-    def _anidb_to_title_data(self, anime: Any, anime_id: str) -> dict:
-        def pick(*names):
-            for name in names:
-                value = getattr(anime, name, None)
-                if value:
-                    return value
-            return ""
+    def _anidb_http_request(self, request_name: str, params: dict) -> str:
+        base_url = "http://api.anidb.net:9001/httpapi"
+        query = {
+            "request": request_name,
+            "client": "hsorter",
+            "clientver": "1",
+            "protover": "1",
+        }
+        query.update(params)
+        url = f"{base_url}?{urllib.parse.urlencode(query)}"
+        with urllib.request.urlopen(url, timeout=20) as response:
+            content = response.read()
+        return content.decode("utf-8", errors="replace")
 
-        def join_list(value):
-            if isinstance(value, (list, tuple, set)):
-                return ", ".join([str(item) for item in value if item])
-            return value or ""
-
-        year_value = pick("year", "start_year", "startdate")
-        try:
-            year_value = int(str(year_value)[:4]) if year_value else ""
-        except ValueError:
-            year_value = ""
+    def _anidb_xml_to_title_data(self, xml_text: str, anime_id: str) -> dict:
+        root = ET.fromstring(xml_text)
+        anime_node = root.find("anime")
+        if anime_node is None:
+            raise ValueError("Ответ AniDB не содержит данных anime.")
+        titles = anime_node.findall("title")
+        main_title = ""
+        alt_titles = []
+        for title in titles:
+            title_type = title.attrib.get("type", "")
+            value = (title.text or "").strip()
+            if not value:
+                continue
+            if title_type in ("main", "official") and not main_title:
+                main_title = value
+            else:
+                alt_titles.append(value)
+        description = (anime_node.findtext("description") or "").strip()
+        start_date = (anime_node.findtext("startdate") or "").strip()
+        year_value = ""
+        if start_date:
+            year_value = start_date.split("-")[0]
+        episodes = (anime_node.findtext("episodecount") or "").strip()
+        tags = []
+        for genre in anime_node.findall("genres/genre"):
+            name = (genre.text or "").strip()
+            if name:
+                tags.append(name)
+        for category in anime_node.findall("categories/category"):
+            name = (category.findtext("name") or "").strip()
+            if name:
+                tags.append(name)
         data = {
-            "main_title": pick("title", "romaji", "name"),
-            "alt_titles": join_list(pick("synonyms", "titles", "aka", "other_titles")),
-            "year_start": str(year_value) if year_value else "",
+            "main_title": main_title,
+            "alt_titles": ", ".join(sorted(set(alt_titles))),
+            "year_start": year_value,
             "year_end": "",
-            "episodes": str(pick("episodes", "episodecount")),
+            "episodes": episodes,
             "total_duration": "",
-            "description": pick("description", "summary", "synopsis"),
-            "country": pick("country"),
-            "production": join_list(pick("producers", "studio", "production")),
-            "director": join_list(pick("director")),
+            "description": description,
+            "country": "",
+            "production": "",
+            "director": "",
             "character_designer": "",
-            "author": join_list(pick("author", "creator")),
+            "author": "",
             "composer": "",
             "subtitles_author": "",
             "voice_author": "",
             "title_comment": "",
-            "tags": join_list(pick("genres", "tags")),
+            "tags": ", ".join(sorted(set(tags))),
             "url": f"https://anidb.net/anime/{anime_id}",
         }
-        return {key: str(value or "") for key, value in data.items()}
+        return data
 
     def _title_data_for_sync(self) -> dict:
         info_map = {
