@@ -1794,7 +1794,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     def _anidb_xml_to_title_data(self, xml_text: str, anime_id: str) -> dict:
         root = ET.fromstring(xml_text)
-        anime_node = root.find("anime")
+        anime_node = root if root.tag == "anime" else root.find("anime")
         if anime_node is None:
             raise ValueError("Ответ AniDB не содержит данных anime.")
         titles = anime_node.findall("title")
