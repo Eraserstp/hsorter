@@ -1799,8 +1799,17 @@ class HSorterWindow(Gtk.ApplicationWindow):
         }
         query.update(params)
         url = f"{base_url}?{urllib.parse.urlencode(query)}"
-        with urllib.request.urlopen(url, timeout=20) as response:
+        request = urllib.request.Request(url, headers={"Accept-Encoding": "gzip"})
+        with urllib.request.urlopen(request, timeout=20) as response:
             content = response.read()
+            encoding = response.headers.get("Content-Encoding", "")
+        if encoding.lower() == "gzip" or content.startswith(b"\x1f\x8b"):
+            try:
+                import gzip
+
+                content = gzip.decompress(content)
+            except (OSError, EOFError):
+                pass
         return content.decode("utf-8", errors="replace")
 
     def _anidb_xml_to_title_data(self, xml_text: str, anime_id: str) -> dict:
