@@ -11,6 +11,13 @@ import hashlib
 import html
 
 import gi
+import importlib.util
+import re
+from typing import Any
+
+adbb = None
+if importlib.util.find_spec("adbb") is not None:
+    import adbb
 
 # Требуем конкретные версии GTK/GDK для корректной работы
 gi.require_version("Gtk", "3.0")
@@ -731,6 +738,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     # Левая панель: библиотека тайтлов и фильтры.
     def _build_library(self) -> None:
+        system_menu = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        system_menu.set_margin_bottom(4)
+        self.settings_button = Gtk.Button(label="⚙")
+        self.settings_button.set_size_request(36, 36)
+        self.settings_button.set_tooltip_text("Настройки")
+        self.settings_button.connect("clicked", lambda _b: self.open_settings_dialog())
+        system_menu.pack_start(self.settings_button, False, False, 0)
+        system_menu.pack_start(Gtk.Box(), True, True, 0)
+        self.library_box.pack_start(system_menu, False, False, 0)
+
         filter_frame = Gtk.Frame(label="Фильтр")
         filter_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         filter_box.set_margin_top(6)
@@ -771,9 +788,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         add_button = Gtk.Button(label="Добавить")
         add_button.connect("clicked", lambda _b: self.add_title())
+        import_button = Gtk.Button(label="Импорт")
+        import_button.connect("clicked", lambda _b: self.import_title())
         delete_button = Gtk.Button(label="Удалить")
         delete_button.connect("clicked", lambda _b: self.delete_title())
         buttons.pack_start(add_button, False, False, 0)
+        buttons.pack_start(import_button, False, False, 0)
         buttons.pack_start(delete_button, False, False, 0)
         self.library_box.pack_start(buttons, False, False, 0)
 
@@ -872,9 +892,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.url_entry = Gtk.Entry()
         open_url_button = Gtk.Button(label="Открыть ссылку")
         open_url_button.connect("clicked", lambda _b: self.open_title_url())
-        self.url_entry.connect("changed", lambda _e: self._mark_dirty())
+        self.sync_anidb_button = Gtk.Button(label="Синхр.")
+        self.sync_anidb_button.set_sensitive(False)
+        self.sync_anidb_button.connect("clicked", lambda _b: self.sync_title_with_anidb())
+        self.url_entry.connect("changed", lambda _e: self._on_url_changed())
         url_row.pack_start(self._row("URL", self.url_entry), True, True, 0)
         url_row.pack_start(open_url_button, False, False, 0)
+        url_row.pack_start(self.sync_anidb_button, False, False, 0)
         self.details_box.pack_start(url_row, False, False, 0)
 
         date_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -1108,6 +1132,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.episodes_spin.set_value(title["episodes"] or 0)
         self.duration_entry.set_text(title["total_duration"])
         self.url_entry.set_text(title["url"] or "")
+        self._update_sync_button()
         self.created_at_value = title["created_at"] or ""
         self.updated_at_value = title["updated_at"] or ""
         self.created_at_label.set_text(self._format_date(self.created_at_value))
@@ -1186,6 +1211,27 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.clear_form()
         self.main_title.grab_focus()
         self._update_save_state()
+
+    def import_title(self) -> None:
+        url = self._prompt_text("Импорт AniDB", "Введите ссылку на AniDB")
+        if not url:
+            return
+        anime_id = self._extract_anidb_id(url)
+        if not anime_id:
+            self._message("AniDB", "Не удалось определить ID тайтла из ссылки.")
+            return
+        anidb_data = self._fetch_anidb_data(anime_id)
+        if not anidb_data:
+            return
+        empty_local = {key: "" for key in anidb_data}
+        accepted, data = self._open_sync_wizard(empty_local, anidb_data, is_import=True)
+        if not accepted:
+            return
+        self.new_title_mode = True
+        self.current_title_id = None
+        self.clear_form()
+        self._apply_sync_data_to_form(data)
+        self.save_title()
 
     # Сохранить изменения.
     def save_title(self) -> bool:
@@ -1287,6 +1333,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             entry.set_text("")
         self.title_comment_buffer.set_text("")
         self.url_entry.set_text("")
+        self._update_sync_button()
         self.created_at_label.set_text("")
         self.updated_at_label.set_text("")
         self.created_at_value = ""
@@ -1618,6 +1665,403 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not url.startswith(("http://", "https://")):
             url = f"https://{url}"
         Gio.AppInfo.launch_default_for_uri(url, None)
+
+    def _on_url_changed(self) -> None:
+        self._mark_dirty()
+        self._update_sync_button()
+
+    def _extract_anidb_id(self, url: str) -> str | None:
+        if not url:
+            return None
+        match = re.search(r"anidb\\.net/anime/(\\d+)", url)
+        return match.group(1) if match else None
+
+    def _update_sync_button(self) -> None:
+        if not hasattr(self, "sync_anidb_button"):
+            return
+        url = self.url_entry.get_text().strip()
+        self.sync_anidb_button.set_sensitive(bool(self._extract_anidb_id(url)))
+
+    def sync_title_with_anidb(self) -> None:
+        url = self.url_entry.get_text().strip()
+        anime_id = self._extract_anidb_id(url)
+        if not anime_id:
+            self._message("AniDB", "Ссылка на AniDB не найдена.")
+            return
+        anidb_data = self._fetch_anidb_data(anime_id)
+        if not anidb_data:
+            return
+        local_data = self._title_data_for_sync()
+        accepted, data = self._open_sync_wizard(local_data, anidb_data, is_import=False)
+        if not accepted:
+            return
+        self._apply_sync_data_to_form(data)
+        self.save_title()
+
+    def _prompt_text(self, title: str, label: str) -> str | None:
+        dialog = Gtk.Dialog(title=title, transient_for=self, modal=True)
+        dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
+        dialog.add_button("ОК", Gtk.ResponseType.OK)
+        content = dialog.get_content_area()
+        content.set_spacing(6)
+        content.add(Gtk.Label(label=label))
+        entry = Gtk.Entry()
+        content.add(entry)
+        dialog.show_all()
+        response = dialog.run()
+        text_value = entry.get_text().strip()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return None
+        return text_value
+
+    def _get_anidb_settings(self) -> dict:
+        return {
+            "username": self.db.get_setting("anidb_username") or "",
+            "password": self.db.get_setting("anidb_password") or "",
+            "client": self.db.get_setting("anidb_client") or "",
+            "client_version": self.db.get_setting("anidb_client_version") or "",
+        }
+
+    def open_settings_dialog(self) -> None:
+        dialog = Gtk.Dialog(title="Настройки", transient_for=self, modal=True)
+        dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Сохранить", Gtk.ResponseType.OK)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+
+        anidb_frame = Gtk.Frame(label="AniDB.net")
+        anidb_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        anidb_box.set_margin_top(6)
+        anidb_box.set_margin_bottom(6)
+        anidb_box.set_margin_start(6)
+        anidb_box.set_margin_end(6)
+        anidb_frame.add(anidb_box)
+
+        grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+        username_entry = Gtk.Entry()
+        password_entry = Gtk.Entry()
+        password_entry.set_visibility(False)
+        client_entry = Gtk.Entry()
+        client_version_entry = Gtk.Entry()
+        settings = self._get_anidb_settings()
+        username_entry.set_text(settings["username"])
+        password_entry.set_text(settings["password"])
+        client_entry.set_text(settings["client"])
+        client_version_entry.set_text(settings["client_version"])
+
+        labels = [
+            ("Логин", username_entry),
+            ("Пароль", password_entry),
+            ("Client", client_entry),
+            ("Client version", client_version_entry),
+        ]
+        for idx, (label, entry) in enumerate(labels):
+            grid.attach(Gtk.Label(label=label, xalign=0), 0, idx, 1, 1)
+            grid.attach(entry, 1, idx, 1, 1)
+        anidb_box.pack_start(grid, False, False, 0)
+        content.add(anidb_frame)
+
+        dialog.show_all()
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            self.db.set_setting("anidb_username", username_entry.get_text().strip())
+            self.db.set_setting("anidb_password", password_entry.get_text())
+            self.db.set_setting("anidb_client", client_entry.get_text().strip())
+            self.db.set_setting("anidb_client_version", client_version_entry.get_text().strip())
+        dialog.destroy()
+
+    def _fetch_anidb_data(self, anime_id: str) -> dict | None:
+        if adbb is None:
+            self._message("AniDB", "Библиотека adbb не установлена.")
+            return None
+        settings = self._get_anidb_settings()
+        missing = [key for key, value in settings.items() if not value]
+        if missing:
+            self._message("AniDB", "Заполните настройки AniDB в настройках приложения.")
+            return None
+        try:
+            if hasattr(adbb, "init"):
+                adbb.init(
+                    username=settings["username"],
+                    password=settings["password"],
+                    client=settings["client"],
+                    clientver=int(settings["client_version"] or 0),
+                )
+        except Exception as exc:
+            self._message("AniDB", f"Ошибка инициализации: {exc}")
+            return None
+        try:
+            if hasattr(adbb, "Anime"):
+                anime = adbb.Anime(int(anime_id))
+            elif hasattr(adbb, "get_anime"):
+                anime = adbb.get_anime(int(anime_id))
+            else:
+                self._message("AniDB", "Не удалось найти API AniDB в библиотеке adbb.")
+                return None
+        except Exception as exc:
+            self._message("AniDB", f"Ошибка запроса AniDB: {exc}")
+            return None
+        return self._anidb_to_title_data(anime, anime_id)
+
+    def _anidb_to_title_data(self, anime: Any, anime_id: str) -> dict:
+        def pick(*names):
+            for name in names:
+                value = getattr(anime, name, None)
+                if value:
+                    return value
+            return ""
+
+        def join_list(value):
+            if isinstance(value, (list, tuple, set)):
+                return ", ".join([str(item) for item in value if item])
+            return value or ""
+
+        year_value = pick("year", "start_year", "startdate")
+        try:
+            year_value = int(str(year_value)[:4]) if year_value else ""
+        except ValueError:
+            year_value = ""
+        data = {
+            "main_title": pick("title", "romaji", "name"),
+            "alt_titles": join_list(pick("synonyms", "titles", "aka", "other_titles")),
+            "year_start": str(year_value) if year_value else "",
+            "year_end": "",
+            "episodes": str(pick("episodes", "episodecount")),
+            "total_duration": "",
+            "description": pick("description", "summary", "synopsis"),
+            "country": pick("country"),
+            "production": join_list(pick("producers", "studio", "production")),
+            "director": join_list(pick("director")),
+            "character_designer": "",
+            "author": join_list(pick("author", "creator")),
+            "composer": "",
+            "subtitles_author": "",
+            "voice_author": "",
+            "title_comment": "",
+            "tags": join_list(pick("genres", "tags")),
+            "url": f"https://anidb.net/anime/{anime_id}",
+        }
+        return {key: str(value or "") for key, value in data.items()}
+
+    def _title_data_for_sync(self) -> dict:
+        info_map = {
+            "country": self.info_entries["Страна"].get_text().strip(),
+            "production": self.info_entries["Производство"].get_text().strip(),
+            "director": self.info_entries["Режиссёр"].get_text().strip(),
+            "character_designer": self.info_entries["Дизайнер персонажей"].get_text().strip(),
+            "author": self.info_entries["Автор сценария/оригинала"].get_text().strip(),
+            "composer": self.info_entries["Композитор"].get_text().strip(),
+            "subtitles_author": self.info_entries["Автор субтитров"].get_text().strip(),
+            "voice_author": self.info_entries["Автор озвучки"].get_text().strip(),
+        }
+        return {
+            "main_title": self.main_title.get_text().strip(),
+            "alt_titles": self.alt_titles.get_text().strip(),
+            "year_start": str(int(self.year_start.get_value())) if self.year_start else "",
+            "year_end": self.year_end.get_text().strip(),
+            "episodes": str(int(self.episodes_spin.get_value())) if self.episodes_spin else "",
+            "total_duration": self.duration_entry.get_text().strip(),
+            "description": self.description_buffer.get_text(
+                self.description_buffer.get_start_iter(),
+                self.description_buffer.get_end_iter(),
+                True,
+            ).strip(),
+            "country": info_map["country"],
+            "production": info_map["production"],
+            "director": info_map["director"],
+            "character_designer": info_map["character_designer"],
+            "author": info_map["author"],
+            "composer": info_map["composer"],
+            "subtitles_author": info_map["subtitles_author"],
+            "voice_author": info_map["voice_author"],
+            "title_comment": self.title_comment_buffer.get_text(
+                self.title_comment_buffer.get_start_iter(),
+                self.title_comment_buffer.get_end_iter(),
+                True,
+            ).strip(),
+            "tags": self.tags_entry.get_text().strip(),
+            "url": self.url_entry.get_text().strip(),
+        }
+
+    def _apply_sync_data_to_form(self, data: dict) -> None:
+        self.main_title.set_text(data.get("main_title", ""))
+        self.alt_titles.set_text(data.get("alt_titles", ""))
+        year_start = data.get("year_start", "")
+        if year_start.isdigit():
+            self.year_start.set_value(int(year_start))
+        else:
+            self.year_start.set_value(datetime.date.today().year)
+        self.year_end.set_text(data.get("year_end", ""))
+        episodes_value = data.get("episodes", "")
+        if episodes_value.isdigit():
+            self.episodes_spin.set_value(int(episodes_value))
+        else:
+            self.episodes_spin.set_value(0)
+        self.duration_entry.set_text(data.get("total_duration", ""))
+        self.description_buffer.set_text(data.get("description", ""))
+        self.info_entries["Страна"].set_text(data.get("country", ""))
+        self.info_entries["Производство"].set_text(data.get("production", ""))
+        self.info_entries["Режиссёр"].set_text(data.get("director", ""))
+        self.info_entries["Дизайнер персонажей"].set_text(
+            data.get("character_designer", "")
+        )
+        self.info_entries["Автор сценария/оригинала"].set_text(data.get("author", ""))
+        self.info_entries["Композитор"].set_text(data.get("composer", ""))
+        self.info_entries["Автор субтитров"].set_text(data.get("subtitles_author", ""))
+        self.info_entries["Автор озвучки"].set_text(data.get("voice_author", ""))
+        self.title_comment_buffer.set_text(data.get("title_comment", ""))
+        self.tags_entry.set_text(data.get("tags", ""))
+        self.url_entry.set_text(data.get("url", ""))
+        self._update_sync_button()
+        self._mark_dirty()
+
+    def _open_sync_wizard(
+        self, local_data: dict, anidb_data: dict, is_import: bool
+    ) -> tuple[bool, dict]:
+        fields = [
+            ("main_title", "Основное название", False),
+            ("alt_titles", "Дополнительные названия", False),
+            ("year_start", "Год начала", False),
+            ("year_end", "Год окончания", False),
+            ("episodes", "Эпизоды", False),
+            ("total_duration", "Длительность", False),
+            ("description", "Краткое описание", True),
+            ("country", "Страна", False),
+            ("production", "Производство", False),
+            ("director", "Режиссёр", False),
+            ("character_designer", "Дизайнер персонажей", False),
+            ("author", "Автор сценария/оригинала", False),
+            ("composer", "Композитор", False),
+            ("subtitles_author", "Автор субтитров", False),
+            ("voice_author", "Автор озвучки", False),
+            ("title_comment", "Комментарий", True),
+            ("tags", "Теги", False),
+            ("url", "URL", False),
+        ]
+        data = {key: local_data.get(key, "") for key, _, _ in fields}
+        dialog = Gtk.Dialog(title="Синхронизация AniDB", transient_for=self, modal=True)
+        dialog.set_default_size(900, 600)
+        dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+
+        header = Gtk.Label(label="")
+        header.set_xalign(0)
+        content.add(header)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        local_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        remote_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        row.pack_start(local_box, True, True, 0)
+        row.pack_start(remote_box, True, True, 0)
+        content.add(row)
+
+        local_label = Gtk.Label(label="Локальные данные")
+        local_label.set_xalign(0)
+        local_box.pack_start(local_label, False, False, 0)
+        local_buffer = Gtk.TextBuffer()
+        local_view = Gtk.TextView(buffer=local_buffer)
+        local_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        local_scroller = Gtk.ScrolledWindow()
+        local_scroller.set_vexpand(True)
+        local_scroller.add(local_view)
+        local_box.pack_start(local_scroller, True, True, 0)
+
+        remote_label = Gtk.Label(label="AniDB")
+        remote_label.set_xalign(0)
+        remote_box.pack_start(remote_label, False, False, 0)
+        remote_buffer = Gtk.TextBuffer()
+        remote_view = Gtk.TextView(buffer=remote_buffer)
+        remote_view.set_editable(False)
+        remote_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        remote_scroller = Gtk.ScrolledWindow()
+        remote_scroller.set_vexpand(True)
+        remote_scroller.add(remote_view)
+        remote_box.pack_start(remote_scroller, True, True, 0)
+
+        action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        copy_button = Gtk.Button(label="Копировать")
+        copy_all_button = Gtk.Button(label="Копировать всё")
+        prev_button = Gtk.Button(label="Назад")
+        next_button = Gtk.Button(label="Далее")
+        action_row.pack_start(copy_button, False, False, 0)
+        action_row.pack_start(copy_all_button, False, False, 0)
+        action_row.pack_end(next_button, False, False, 0)
+        action_row.pack_end(prev_button, False, False, 0)
+        content.add(action_row)
+
+        index = 0
+
+        def read_local() -> None:
+            key, _, _ = fields[index]
+            data[key] = local_buffer.get_text(
+                local_buffer.get_start_iter(),
+                local_buffer.get_end_iter(),
+                True,
+            ).strip()
+
+        def show_field() -> None:
+            key, label, multiline = fields[index]
+            header.set_text(f"{label} ({index + 1}/{len(fields)})")
+            local_value = data.get(key, "")
+            remote_value = anidb_data.get(key, "")
+            local_buffer.set_text(local_value)
+            remote_buffer.set_text(remote_value)
+            if multiline:
+                local_view.set_size_request(-1, 180)
+                remote_view.set_size_request(-1, 180)
+            else:
+                local_view.set_size_request(-1, 80)
+                remote_view.set_size_request(-1, 80)
+            prev_button.set_sensitive(index > 0)
+            next_button.set_label("Завершить" if index == len(fields) - 1 else "Далее")
+
+        def copy_current() -> None:
+            key, _, _ = fields[index]
+            data[key] = anidb_data.get(key, "")
+            local_buffer.set_text(data[key])
+
+        def copy_all() -> None:
+            if not self._confirm(
+                "Скопировать всё", "Данные тайтла будут перезаписаны целиком! Продолжить?"
+            ):
+                return
+            for key, _, _ in fields:
+                data[key] = anidb_data.get(key, "")
+            show_field()
+
+        def go_prev() -> None:
+            nonlocal index
+            read_local()
+            if index > 0:
+                index -= 1
+                show_field()
+
+        def go_next() -> None:
+            nonlocal index
+            read_local()
+            if index < len(fields) - 1:
+                index += 1
+                show_field()
+            else:
+                dialog.response(Gtk.ResponseType.OK)
+
+        copy_button.connect("clicked", lambda _b: copy_current())
+        copy_all_button.connect("clicked", lambda _b: copy_all())
+        prev_button.connect("clicked", lambda _b: go_prev())
+        next_button.connect("clicked", lambda _b: go_next())
+
+        show_field()
+        dialog.show_all()
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return False, data
+        action = "импортировать" if is_import else "сохранить изменения"
+        if not self._confirm("Сохранение", f"Хотите {action}?"):
+            return False, data
+        return True, data
 
     def _format_date(self, value: str | None) -> str:
         if not value:
