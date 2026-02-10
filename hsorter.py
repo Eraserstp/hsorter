@@ -9,12 +9,16 @@ import shutil
 import colorsys
 import hashlib
 import html
+import requests
+import time
+import random
 
 import gi
 import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 
 # Требуем конкретные версии GTK/GDK для корректной работы
 gi.require_version("Gtk", "3.0")
@@ -1832,8 +1836,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 main_title = value
             elif title_type == "official" and not official_title:
                 official_title = value
-            elif title_type == "synonym" and lang in {"ja", "en", "ru"}:
-                synonyms.append(value)
+            elif title_type == "synonym" and lang in {"x-jat", "ja", "en", "ru"}:
+                if value != main_title:
+                    synonyms.append(value)
         if not main_title:
             main_title = official_title
         alt_titles_parts = []
@@ -1850,13 +1855,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
         rating_value = (anime_node.findtext("ratings/permanent") or "").strip()
         cover_path = self._download_anidb_cover(anime_node)
         tags = []
+        character_ids = []
+        char_tags = []
         for tag in anime_node.findall("tags/tag"):
-            weight = tag.attrib.get("weight", "0")  # получаем значение weight (по умолчанию "1")
+            weight = tag.attrib.get("weight", "0")  # получаем значение weight (по умолчанию "0")
             if weight == "0":  # пропускаем теги с weight = 0
                 continue
             name = (tag.findtext("name") or "").strip()
             if name:
                 tags.append(name)
+        for singlechar in anime_node.findall("characters/character"):
+            char_id = singlechar.attrib.get("id", None)  # получаем значение weight (по умолчанию "None")
+            if char_id != None:
+                character_ids.append(char_id)
+        if len(character_ids)>0:
+            tags = list(dict.fromkeys(tags + self._extract_anidb_characters_tags(character_ids)))
         tags_value = "; ".join(sorted(set(tags)))
         creators = {
             "Animation Work": [],
@@ -1896,6 +1909,62 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "cover_path": cover_path or "",
         }
         return data
+
+    def _extract_anidb_characters_tags(self, character_ids):
+        """
+        Извлекает имена тегов AniDB для списка идентификаторов персонажей.
+        Это метод класса, поэтому первым параметром идет self.
+        
+        Args:
+            character_ids (list): Список идентификаторов персонажей AniDB
+            
+        Returns:
+            list: Список уникальных имен тегов AniDB для всех персонажей
+        """
+       
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        all_tags = []
+        
+        for index, character_id in enumerate(character_ids, 1):
+            try:
+                url = f"https://anidb.net/character/{character_id}"
+                print(f"Запрашиваю данные для персонажа ID: {character_id}")
+                
+                response = requests.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Находим все span с классом "tagname"
+                tag_spans = soup.find_all('span', class_='tagname')
+                
+                # Извлекаем текстовое содержимое каждого span
+                tags = [span.get_text(strip=True) for span in tag_spans]
+                
+                # Добавляем теги в общий список
+                all_tags.extend(tags)
+                
+                print(f"  Найдено тегов: {len(tags)}")
+                
+                # Случайная задержка между запросами (1.0 - 3.0 секунды)
+                if index < len(character_ids):  # Не ставим задержку после последнего запроса
+                    delay = random.uniform(1.0, 3.0)
+                    print(f"  Задержка перед следующим запросом: {delay} сек.")
+                    time.sleep(delay)
+                
+            except requests.exceptions.RequestException as e:
+                print(f"  Ошибка при запросе ID {character_id}: {e}")
+            except Exception as e:
+                print(f"  Неожиданная ошибка для ID {character_id}: {e}")
+        
+        # Удаляем дубликаты, сохраняя порядок
+        unique_tags = list(dict.fromkeys(all_tags))
+        
+        print(f"\nВсего уникальных тегов найдено: {len(unique_tags)}")
+        return unique_tags
 
     def _download_anidb_cover(self, anime_node: ET.Element) -> str:
         picture_name = (anime_node.findtext("picture") or "").strip()
@@ -1976,10 +2045,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.episodes_spin.set_value(int(episodes_value))
         else:
             self.episodes_spin.set_value(0)
-        if "total_duration" in data:
-            self.duration_entry.set_text(data.get("total_duration", ""))
+        # if "total_duration" in data:
+        #    self.duration_entry.set_text(data.get("total_duration", ""))
         self.description_buffer.set_text(data.get("description", ""))
-        self.info_entries["Страна"].set_text(data.get("country", ""))
+        self.info_entries["Страна"].set_text(data.get("country", "Япония"))
         self.info_entries["Производство"].set_text(data.get("production", ""))
         self.info_entries["Режиссёр"].set_text(data.get("director", ""))
         self.info_entries["Дизайнер персонажей"].set_text(
@@ -1987,12 +2056,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
         )
         self.info_entries["Автор сценария/оригинала"].set_text(data.get("author", ""))
         self.info_entries["Композитор"].set_text(data.get("composer", ""))
-        self.info_entries["Автор субтитров"].set_text(data.get("subtitles_author", ""))
-        self.info_entries["Автор озвучки"].set_text(data.get("voice_author", ""))
-        self.title_comment_buffer.set_text(data.get("title_comment", ""))
+        # self.info_entries["Автор субтитров"].set_text(data.get("subtitles_author", ""))
+        # self.info_entries["Автор озвучки"].set_text(data.get("voice_author", ""))
+        # self.title_comment_buffer.set_text(data.get("title_comment", ""))
         self.tags_entry.set_text(data.get("tags", ""))
-        if "url" in data:
-            self.url_entry.set_text(data.get("url", ""))
+        # if "url" in data:
+        #    self.url_entry.set_text(data.get("url", ""))
         cover_path = data.get("cover_path", "")
         if cover_path:
             self.cover_path = cover_path
