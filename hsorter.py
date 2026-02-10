@@ -1851,6 +1851,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         cover_path = self._download_anidb_cover(anime_node)
         tags = []
         for tag in anime_node.findall("tags/tag"):
+            weight = tag.attrib.get("weight", "0")  # получаем значение weight (по умолчанию "1")
+            if weight == "0":  # пропускаем теги с weight = 0
+                continue
             name = (tag.findtext("name") or "").strip()
             if name:
                 tags.append(name)
