@@ -1973,7 +1973,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.episodes_spin.set_value(int(episodes_value))
         else:
             self.episodes_spin.set_value(0)
-        self.duration_entry.set_text(data.get("total_duration", ""))
+        if "total_duration" in data:
+            self.duration_entry.set_text(data.get("total_duration", ""))
         self.description_buffer.set_text(data.get("description", ""))
         self.info_entries["Страна"].set_text(data.get("country", ""))
         self.info_entries["Производство"].set_text(data.get("production", ""))
@@ -1987,7 +1988,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.info_entries["Автор озвучки"].set_text(data.get("voice_author", ""))
         self.title_comment_buffer.set_text(data.get("title_comment", ""))
         self.tags_entry.set_text(data.get("tags", ""))
-        self.url_entry.set_text(data.get("url", ""))
+        if "url" in data:
+            self.url_entry.set_text(data.get("url", ""))
         cover_path = data.get("cover_path", "")
         if cover_path:
             self.cover_path = cover_path
@@ -1999,25 +2001,20 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self, local_data: dict, anidb_data: dict, is_import: bool
     ) -> tuple[bool, dict]:
         fields = [
+            ("cover_path", "Основное изображение", False),
             ("main_title", "Основное название", False),
             ("alt_titles", "Дополнительные названия", False),
             ("rating", "Рейтинг", False),
             ("year_start", "Год начала", False),
             ("year_end", "Год окончания", False),
             ("episodes", "Эпизоды", False),
-            ("total_duration", "Длительность", False),
             ("description", "Краткое описание", True),
-            ("country", "Страна", False),
             ("production", "Производство", False),
             ("director", "Режиссёр", False),
             ("character_designer", "Дизайнер персонажей", False),
             ("author", "Автор сценария/оригинала", False),
             ("composer", "Композитор", False),
-            ("subtitles_author", "Автор субтитров", False),
-            ("voice_author", "Автор озвучки", False),
-            ("title_comment", "Комментарий", True),
             ("tags", "Теги", False),
-            ("url", "URL", False),
         ]
         data = {key: local_data.get(key, "") for key, _, _ in fields}
         dialog = Gtk.Dialog(title="Синхронизация AniDB", transient_for=self, modal=True)
@@ -2047,6 +2044,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         local_scroller.set_vexpand(True)
         local_scroller.add(local_view)
         local_box.pack_start(local_scroller, True, True, 0)
+        local_cover_image = Gtk.Image()
+        local_cover_image.set_size_request(220, 220)
+        local_cover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        local_cover_box.pack_start(local_cover_image, False, False, 0)
+        local_box.pack_start(local_cover_box, False, False, 0)
 
         remote_label = Gtk.Label(label="AniDB")
         remote_label.set_xalign(0)
@@ -2059,6 +2061,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         remote_scroller.set_vexpand(True)
         remote_scroller.add(remote_view)
         remote_box.pack_start(remote_scroller, True, True, 0)
+        remote_cover_image = Gtk.Image()
+        remote_cover_image.set_size_request(220, 220)
+        remote_cover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        remote_cover_box.pack_start(remote_cover_image, False, False, 0)
+        remote_box.pack_start(remote_cover_box, False, False, 0)
 
         action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         copy_button = Gtk.Button(label="Копировать")
@@ -2094,6 +2101,22 @@ class HSorterWindow(Gtk.ApplicationWindow):
             else:
                 local_view.set_size_request(-1, 80)
                 remote_view.set_size_request(-1, 80)
+            if key == "cover_path":
+                local_cover_box.show()
+                remote_cover_box.show()
+                local_pixbuf = self._load_pixbuf(local_value) if local_value else None
+                remote_pixbuf = self._load_pixbuf(remote_value) if remote_value else None
+                if local_pixbuf:
+                    local_cover_image.set_from_pixbuf(local_pixbuf)
+                else:
+                    local_cover_image.clear()
+                if remote_pixbuf:
+                    remote_cover_image.set_from_pixbuf(remote_pixbuf)
+                else:
+                    remote_cover_image.clear()
+            else:
+                local_cover_box.hide()
+                remote_cover_box.hide()
             prev_button.set_sensitive(index > 0)
             next_button.set_label("Завершить" if index == len(fields) - 1 else "Далее")
 
