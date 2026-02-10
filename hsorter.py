@@ -1817,54 +1817,104 @@ class HSorterWindow(Gtk.ApplicationWindow):
         anime_node = root if root.tag == "anime" else root.find("anime")
         if anime_node is None:
             raise ValueError("Ответ AniDB не содержит данных anime.")
-        titles = anime_node.findall("title")
+        titles_node = anime_node.find("titles")
+        titles = titles_node.findall("title") if titles_node is not None else []
         main_title = ""
-        alt_titles = []
+        official_title = ""
+        synonyms = []
         for title in titles:
             title_type = title.attrib.get("type", "")
+            lang = title.attrib.get("{http://www.w3.org/XML/1998/namespace}lang", "")
             value = (title.text or "").strip()
             if not value:
                 continue
-            if title_type in ("main", "official") and not main_title:
+            if title_type == "main" and not main_title:
                 main_title = value
-            else:
-                alt_titles.append(value)
+            elif title_type == "official" and not official_title:
+                official_title = value
+            elif title_type == "synonym" and lang in {"ja", "en", "ru"}:
+                synonyms.append(value)
+        if not main_title:
+            main_title = official_title
+        alt_titles_parts = []
+        if official_title:
+            alt_titles_parts.append(official_title)
+        alt_titles_parts.extend(synonyms)
+        alt_titles_value = "; ".join([title for title in alt_titles_parts if title])
         description = (anime_node.findtext("description") or "").strip()
         start_date = (anime_node.findtext("startdate") or "").strip()
-        year_value = ""
-        if start_date:
-            year_value = start_date.split("-")[0]
+        end_date = (anime_node.findtext("enddate") or "").strip()
+        year_start = start_date.split("-")[0] if start_date else ""
+        year_end = end_date.split("-")[0] if end_date else ""
         episodes = (anime_node.findtext("episodecount") or "").strip()
+        rating_value = (anime_node.findtext("ratings/permanent") or "").strip()
+        cover_path = self._download_anidb_cover(anime_node)
         tags = []
-        for genre in anime_node.findall("genres/genre"):
-            name = (genre.text or "").strip()
+        for tag in anime_node.findall("tags/tag"):
+            name = (tag.findtext("name") or "").strip()
             if name:
                 tags.append(name)
-        for category in anime_node.findall("categories/category"):
-            name = (category.findtext("name") or "").strip()
-            if name:
-                tags.append(name)
+        tags_value = "; ".join(sorted(set(tags)))
+        creators = {
+            "Animation Work": [],
+            "Direction": [],
+            "Character Design": [],
+            "Original Work": [],
+            "Music": [],
+        }
+        for creator in anime_node.findall("creators/name"):
+            creator_type = creator.attrib.get("type", "")
+            value = (creator.text or "").strip()
+            if creator_type in creators and value:
+                creators[creator_type].append(value)
+        creators_joined = {
+            key: "; ".join(values) for key, values in creators.items() if values
+        }
         data = {
             "main_title": main_title,
-            "alt_titles": ", ".join(sorted(set(alt_titles))),
-            "year_start": year_value,
-            "year_end": "",
+            "alt_titles": alt_titles_value,
+            "year_start": year_start,
+            "year_end": year_end,
             "episodes": episodes,
             "total_duration": "",
             "description": description,
             "country": "",
-            "production": "",
-            "director": "",
-            "character_designer": "",
-            "author": "",
-            "composer": "",
+            "production": creators_joined.get("Animation Work", ""),
+            "director": creators_joined.get("Direction", ""),
+            "character_designer": creators_joined.get("Character Design", ""),
+            "author": creators_joined.get("Original Work", ""),
+            "composer": creators_joined.get("Music", ""),
             "subtitles_author": "",
             "voice_author": "",
             "title_comment": "",
-            "tags": ", ".join(sorted(set(tags))),
+            "tags": tags_value,
             "url": f"https://anidb.net/anime/{anime_id}",
+            "rating": rating_value,
+            "cover_path": cover_path or "",
         }
         return data
+
+    def _download_anidb_cover(self, anime_node: ET.Element) -> str:
+        picture_name = (anime_node.findtext("picture") or "").strip()
+        if not picture_name:
+            return ""
+        cover_url = f"https://cdn-eu.anidb.net/images/main/{picture_name}"
+        cache_dir = self._cache_dir()
+        safe_name = os.path.basename(picture_name)
+        target_path = os.path.join(cache_dir, f"anidb_{safe_name}")
+        if os.path.exists(target_path):
+            return target_path
+        try:
+            with urllib.request.urlopen(cover_url, timeout=20) as response:
+                content = response.read()
+        except Exception:
+            return ""
+        try:
+            with open(target_path, "wb") as handle:
+                handle.write(content)
+        except OSError:
+            return ""
+        return target_path
 
     def _title_data_for_sync(self) -> dict:
         info_map = {
@@ -1880,6 +1930,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         return {
             "main_title": self.main_title.get_text().strip(),
             "alt_titles": self.alt_titles.get_text().strip(),
+            "rating": self.rating_entry.get_text().strip(),
             "year_start": str(int(self.year_start.get_value())) if self.year_start else "",
             "year_end": self.year_end.get_text().strip(),
             "episodes": str(int(self.episodes_spin.get_value())) if self.episodes_spin else "",
@@ -1904,11 +1955,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
             ).strip(),
             "tags": self.tags_entry.get_text().strip(),
             "url": self.url_entry.get_text().strip(),
+            "cover_path": self.cover_path or "",
         }
 
     def _apply_sync_data_to_form(self, data: dict) -> None:
         self.main_title.set_text(data.get("main_title", ""))
         self.alt_titles.set_text(data.get("alt_titles", ""))
+        self.rating_entry.set_text(data.get("rating", ""))
         year_start = data.get("year_start", "")
         if year_start.isdigit():
             self.year_start.set_value(int(year_start))
@@ -1935,6 +1988,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.title_comment_buffer.set_text(data.get("title_comment", ""))
         self.tags_entry.set_text(data.get("tags", ""))
         self.url_entry.set_text(data.get("url", ""))
+        cover_path = data.get("cover_path", "")
+        if cover_path:
+            self.cover_path = cover_path
+            self._set_cover(self.cover_path)
         self._update_sync_button()
         self._mark_dirty()
 
@@ -1944,6 +2001,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         fields = [
             ("main_title", "Основное название", False),
             ("alt_titles", "Дополнительные названия", False),
+            ("rating", "Рейтинг", False),
             ("year_start", "Год начала", False),
             ("year_end", "Год окончания", False),
             ("episodes", "Эпизоды", False),
@@ -2083,6 +2141,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         action = "импортировать" if is_import else "сохранить изменения"
         if not self._confirm("Сохранение", f"Хотите {action}?"):
             return False, data
+        cover_path = anidb_data.get("cover_path", "")
+        if cover_path:
+            data["cover_path"] = cover_path
         return True, data
 
     def _format_date(self, value: str | None) -> str:
