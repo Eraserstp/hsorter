@@ -134,6 +134,16 @@ class Database:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tag_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position INTEGER NOT NULL,
+                search TEXT NOT NULL,
+                replace TEXT NOT NULL
+            )
+            """
+        )
         if not self._column_exists("media", "sort_order"):
             cur.execute("ALTER TABLE media ADD COLUMN sort_order INTEGER DEFAULT 0")
         if not self._column_exists("media", "thumbnail_path"):
@@ -507,6 +517,35 @@ class Database:
             )
         self.conn.commit()
 
+    def get_tag_rules(self):
+        cur = self.conn.execute(
+            "SELECT id, position, search, replace "
+            "FROM tag_rules ORDER BY position;"
+        )
+        return cur.fetchall()
+
+
+    def replace_all_tag_rules(self, rules):
+        """
+        rules: list of dict:
+            [
+                {"search": "...", "replace": "..."},
+                ...
+            ]
+        Полностью заменяет список правил.
+        """
+
+        with self.conn:
+            self.conn.execute("DELETE FROM tag_rules;")
+
+            for pos, rule in enumerate(rules):
+                self.conn.execute(
+                    "INSERT INTO tag_rules (position, search, replace) "
+                    "VALUES (?, ?, ?);",
+                    (pos, rule["search"], rule["replace"]),
+                )
+
+
 
 # Извлечение информации о видео через pymediainfo или CLI mediainfo.
 class MediaInfo:
@@ -741,12 +780,24 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _build_library(self) -> None:
         system_menu = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         system_menu.set_margin_bottom(4)
+
+        # Кнопка настроек (шестерёнка)
         self.settings_button = Gtk.Button(label="⚙")
         self.settings_button.set_size_request(36, 36)
         self.settings_button.set_tooltip_text("Настройки")
         self.settings_button.connect("clicked", lambda _b: self.open_settings_dialog())
+
+        # Кнопка для правил тегов
+        self.tagrules_button = Gtk.Button(label="Т")
+        self.tagrules_button.set_size_request(36, 36)
+        self.tagrules_button.set_tooltip_text("Управление правилами тегов")
+        self.tagrules_button.connect("clicked", lambda _b: self.open_tagrules_dialog())
+
+        # Упаковка: сначала шестерёнка, затем "Т", потом расширяемый заполнитель
         system_menu.pack_start(self.settings_button, False, False, 0)
+        system_menu.pack_start(self.tagrules_button, False, False, 0)
         system_menu.pack_start(Gtk.Box(), True, True, 0)
+
         self.library_box.pack_start(system_menu, False, False, 0)
 
         filter_frame = Gtk.Frame(label="Фильтр")
@@ -1365,13 +1416,39 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         if response != Gtk.ResponseType.OK or not new_tag:
             return
+
+        # 1. Собираем все текущие теги из поля
         current = self.tags_entry.get_text().strip()
+        tags = []
         if current:
-            tags = [t.strip() for t in current.split(",") if t.strip()]
-            tags.append(new_tag)
-            self.tags_entry.set_text(", ".join(sorted(set(tags))))
-        else:
-            self.tags_entry.set_text(new_tag)
+            tags = [t.strip() for t in current.split(";") if t.strip()]
+        tags.append(new_tag)  # добавляем новый тег
+
+        # 2. Загружаем правила замены из БД
+        rules = self.db.get_tag_rules()  # возвращает список словарей или кортежей
+        # Преобразуем в удобный формат: список пар (search, replace)
+        rule_pairs = [(row["search"], row["replace"]) for row in rules]
+
+        # 3. Применяем правила к каждому тегу
+        processed_tags = []
+        for tag in tags:
+            current_tag = tag.replace("-- TO BE SPLIT AND DELETED", "")
+            for search, replace in rule_pairs:
+                if current_tag == search:
+                    if replace == "":
+                        # Пустая замена → удаляем тег (прерываем обработку)
+                        current_tag = None
+                        break
+                    else:
+                        current_tag = replace
+                        # после замены продолжаем проверять следующие правила
+            if current_tag is not None and current_tag != "":
+                processed_tags.append(current_tag)
+
+        # 4. Убираем дубликаты и сортируем
+        unique_tags = sorted(set(processed_tags))
+        self.tags_entry.set_text("; ".join(unique_tags))
+
         self._mark_dirty()
 
     # Выбор обложки через файловый диалог.
@@ -1481,7 +1558,17 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not self.current_title_id:
             self._message("Нет тайтла", "Сначала выберите тайтл.")
             return
-        paths = self._pick_files("Выберите видео", ["video/x-matroska", "video/mp4", "video/quicktime"])
+        paths = self._pick_files(
+            "Выберите видео",
+            [
+                "video/x-matroska",
+                "video/mp4",
+                "video/quicktime",
+                "video/x-msvideo",      # AVI
+                "video/x-ms-wmv",       # WMV
+                "video/mpeg"            # MPG / MPEG
+            ]
+        )
         for path in paths:
             info = MediaInfo.describe_video(path)
             self.db.add_media(self.current_title_id, "video", path, info)
@@ -1762,6 +1849,121 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.set_setting("anidb_password", password_entry.get_text())
         dialog.destroy()
 
+
+    def open_tagrules_dialog(self):
+        dialog = Gtk.Dialog(
+            title="Правила замены тегов",
+            transient_for=self,
+            flags=0
+        )
+        dialog.set_default_size(600, 400)
+
+        dialog.add_buttons(
+            "Отмена", Gtk.ResponseType.CANCEL,
+            "Сохранить", Gtk.ResponseType.OK
+        )
+
+        content = dialog.get_content_area()
+
+        # Только search / replace
+        store = Gtk.ListStore(str, str)
+
+        # --- загрузка из БД ---
+        for row in self.db.get_tag_rules():
+            store.append([row["search"], row["replace"]])
+
+        treeview = Gtk.TreeView(model=store)
+
+        # ---- Колонка поиска ----
+        renderer_search = Gtk.CellRendererText(editable=True)
+
+        def on_search_edited(renderer, path, text):
+            store[path][0] = text
+
+        renderer_search.connect("edited", on_search_edited)
+
+        column_search = Gtk.TreeViewColumn("Поиск", renderer_search, text=0)
+        column_search.set_resizable(True)
+        column_search.set_expand(True)
+        column_search.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        column_search.set_fixed_width(250)
+
+        treeview.append_column(column_search)
+
+
+        # ---- Колонка замены ----
+        renderer_replace = Gtk.CellRendererText(editable=True)
+
+        def on_replace_edited(renderer, path, text):
+            store[path][1] = text
+
+        renderer_replace.connect("edited", on_replace_edited)
+
+        column_replace = Gtk.TreeViewColumn("Замена", renderer_replace, text=1)
+        column_replace.set_resizable(True)
+        column_replace.set_expand(True)
+        column_replace.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        column_replace.set_fixed_width(250)
+
+        treeview.append_column(column_replace)
+
+        # ---- Drag & Drop порядок ----
+        treeview.set_reorderable(True)
+
+        # ---- Scroll ----
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_hexpand(True)
+        scrolled.set_vexpand(True)
+        scrolled.add(treeview)
+
+        content.pack_start(scrolled, True, True, 0)
+
+        # ---- Кнопки добавить/удалить ----
+        button_box = Gtk.Box(spacing=6)
+
+        def on_add_clicked(button):
+            store.append(["", ""])
+
+        def on_delete_clicked(button):
+            selection = treeview.get_selection()
+            model, treeiter = selection.get_selected()
+            if treeiter:
+                model.remove(treeiter)
+
+        add_button = Gtk.Button(label="Добавить")
+        add_button.connect("clicked", on_add_clicked)
+
+        delete_button = Gtk.Button(label="Удалить")
+        delete_button.connect("clicked", on_delete_clicked)
+
+        button_box.pack_start(add_button, False, False, 0)
+        button_box.pack_start(delete_button, False, False, 0)
+
+        content.pack_start(button_box, False, False, 6)
+
+        dialog.show_all()
+        response = dialog.run()
+
+        # ---- Сохранение ----
+        if response == Gtk.ResponseType.OK:
+
+            rules = []
+            for row in store:
+                search = row[0].strip()
+                replace = row[1].strip()
+
+                # можно пропускать полностью пустые строки
+                if search or replace:
+                    rules.append({
+                        "search": search,
+                        "replace": replace
+                    })
+
+            self.db.replace_all_tag_rules(rules)
+
+        dialog.destroy()
+
+
     def _fetch_anidb_data(self, anime_id: str) -> dict | None:
         settings = self._get_anidb_settings()
         missing = [key for key, value in settings.items() if not value]
@@ -1870,7 +2072,29 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 character_ids.append(char_id)
         if len(character_ids)>0:
             tags = list(dict.fromkeys(tags + self._extract_anidb_characters_tags(character_ids)))
-        tags_value = "; ".join(sorted(set(tags)))
+
+        # Прогоняем полученный список через правила обработки
+        # 1. Загружаем правила замены из БД
+        rules = self.db.get_tag_rules()  # возвращает список словарей или кортежей
+        # 2. Преобразуем в удобный формат: список пар (search, replace)
+        rule_pairs = [(row["search"], row["replace"]) for row in rules]
+        # 3. Применяем правила к каждому тегу
+        processed_tags = []
+        for tag in tags:
+            current_tag = tag.replace("-- TO BE SPLIT AND DELETED", "")
+            for search, replace in rule_pairs:
+                if current_tag == search:
+                    if replace == "":
+                        # Пустая замена → удаляем тег (прерываем обработку)
+                        current_tag = None
+                        break
+                    else:
+                        current_tag = replace
+                        # после замены продолжаем проверять следующие правила
+            if current_tag is not None and current_tag != "":
+                processed_tags.append(current_tag)
+
+        tags_value = "; ".join(sorted(set(processed_tags)))
         creators = {
             "Animation Work": [],
             "Direction": [],
