@@ -1873,6 +1873,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             store.append([row["search"], row["replace"]])
 
         treeview = Gtk.TreeView(model=store)
+        treeview.set_grid_lines(Gtk.TreeViewGridLines.BOTH)
 
         # ---- Колонка поиска ----
         renderer_search = Gtk.CellRendererText(editable=True)
@@ -2094,7 +2095,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if current_tag is not None and current_tag != "":
                 processed_tags.append(current_tag)
 
-        tags_value = "; ".join(sorted(set(processed_tags)))
+        # 4. Убираем дубликаты и сортируем
+        unique_tags = sorted(set(processed_tags))
+        tags_value = "; ".join(unique_tags)
         creators = {
             "Animation Work": [],
             "Direction": [],
