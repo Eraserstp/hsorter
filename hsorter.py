@@ -830,8 +830,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.right_paned.add1(self.details_box_container)
         self.right_paned.add2(self.media_box)
         self.main_paned.add2(self.right_paned)
-        self.main_paned.set_wide_handle(True)
-        self.right_paned.set_wide_handle(True)
+        self.main_paned.set_wide_handle(False)
+        self.right_paned.set_wide_handle(False)
 
         self._build_library()
         self._build_details()
