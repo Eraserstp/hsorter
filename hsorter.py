@@ -1511,7 +1511,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             ).strip(),
             "url": self.url_entry.get_text().strip(),
             "status": status_data,
-            "tags": self._get_tags_text().strip(),
+            "tags": "; ".join(self._normalize_tag_tokens(self._get_tags_text())),
             "cover_path": self.cover_path,
             "created_at": self.created_at_value,
             "updated_at": self.updated_at_value,
@@ -1577,7 +1577,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._mark_dirty()
 
     def _normalize_tag_tokens(self, raw_tags: str) -> list[str]:
-        normalized = (raw_tags or "").replace(",", ";")
+        normalized = (raw_tags or "").replace("\r", "\n")
+        for separator in [",", "\n"]:
+            normalized = normalized.replace(separator, ";")
         parts = [part.strip() for part in normalized.split(";") if part.strip()]
         return parts
 
@@ -2443,7 +2445,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         data = {}
         for row in rows:
             raw = row["tags"] or ""
-            parts = [p.strip() for p in raw.replace(",", ";").split(";") if p.strip()]
+            parts = self._normalize_tag_tokens(raw)
             for tag in parts:
                 data[tag] = data.get(tag, 0) + 1
         return data
