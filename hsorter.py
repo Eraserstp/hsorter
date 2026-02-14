@@ -9,6 +9,7 @@ import shutil
 import colorsys
 import hashlib
 import html
+import math
 import requests
 import time
 import random
@@ -786,18 +787,18 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.settings_button.set_size_request(36, 36)
         self.settings_button.set_tooltip_text("Настройки")
         self.settings_button.connect("clicked", lambda _b: self.open_settings_dialog())
-
-        # Кнопка для правил тегов
-        self.tagrules_button = Gtk.Button(label="Т")
-        self.tagrules_button.set_size_request(36, 36)
-        self.tagrules_button.set_tooltip_text("Управление правилами тегов")
-        self.tagrules_button.connect("clicked", lambda _b: self.open_tagrules_dialog())
-
-        # Упаковка: сначала шестерёнка, затем "Т", потом расширяемый заполнитель
+        self.tag_rules_button = Gtk.Button(label="🏷")
+        self.tag_rules_button.set_size_request(36, 36)
+        self.tag_rules_button.set_tooltip_text("Управление правилами тегов")
+        self.tag_rules_button.connect("clicked", lambda _b: self.open_tagrules_dialog())
+        self.stats_button = Gtk.Button(label="S")
+        self.stats_button.set_size_request(36, 36)
+        self.stats_button.set_tooltip_text("Статистика")
+        self.stats_button.connect("clicked", lambda _b: self.open_statistics_dialog())
         system_menu.pack_start(self.settings_button, False, False, 0)
-        system_menu.pack_start(self.tagrules_button, False, False, 0)
+        system_menu.pack_start(self.tag_rules_button, False, False, 0)
+        system_menu.pack_start(self.stats_button, False, False, 0)
         system_menu.pack_start(Gtk.Box(), True, True, 0)
-
         self.library_box.pack_start(system_menu, False, False, 0)
 
         filter_frame = Gtk.Frame(label="Фильтр")
@@ -1548,6 +1549,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not self.current_title_id:
             self._message("Нет тайтла", "Сначала выберите тайтл.")
             return
+        paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp"])
         paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp", "image/webp", "image/gif"])
         for path in paths:
             cached_path = self._cache_image(path)
@@ -1809,6 +1811,317 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "username": self.db.get_setting("anidb_username") or "",
             "password": self.db.get_setting("anidb_password") or "",
         }
+
+    def open_statistics_dialog(self) -> None:
+        dialog = Gtk.Dialog(title="Статистика", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        dialog.set_default_size(980, 680)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        notebook = Gtk.Notebook()
+        content.add(notebook)
+
+        notebook.append_page(self._build_titles_stats_tab(), Gtk.Label(label="Тайтлы"))
+        notebook.append_page(self._build_tags_stats_tab(), Gtk.Label(label="Теги"))
+        notebook.append_page(self._build_status_stats_tab(), Gtk.Label(label="Статусы"))
+        notebook.append_page(self._build_video_stats_tab(), Gtk.Label(label="Видео"))
+        notebook.append_page(self._build_audio_stats_tab(), Gtk.Label(label="Аудио"))
+
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
+    def _build_titles_stats_tab(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        data = self._stats_titles_by_year()
+        chart = self._build_bar_chart(data, "Добавление тайтлов по годам")
+        box.pack_start(chart, True, True, 0)
+        return box
+
+    def _build_tags_stats_tab(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        chart = self._build_pie_chart(self._stats_tags(), "Тайтлы по тегам")
+        box.pack_start(chart, True, True, 0)
+        return box
+
+    def _build_status_stats_tab(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        chart = self._build_pie_chart(self._stats_statuses(), "Тайтлы по статусам")
+        box.pack_start(chart, True, True, 0)
+        return box
+
+    def _build_video_stats_tab(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        metric = Gtk.ComboBoxText()
+        metric.append("resolution", "Разрешение видео")
+        metric.append("codec", "Кодек")
+        metric.append("container", "Контейнер")
+        metric.set_active_id("resolution")
+        all_files = Gtk.CheckButton(label="По всем файлам")
+        all_files.set_active(True)
+        controls.pack_start(metric, False, False, 0)
+        controls.pack_start(all_files, False, False, 0)
+        box.pack_start(controls, False, False, 0)
+        chart_holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.pack_start(chart_holder, True, True, 0)
+
+        def refresh(*_args):
+            for child in chart_holder.get_children():
+                chart_holder.remove(child)
+            data = self._stats_video(metric.get_active_id() or "resolution", all_files.get_active())
+            chart_holder.pack_start(self._build_pie_chart(data, "Видео"), True, True, 0)
+            chart_holder.show_all()
+
+        metric.connect("changed", refresh)
+        all_files.connect("toggled", refresh)
+        refresh()
+        return box
+
+    def _build_audio_stats_tab(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.set_margin_top(6)
+        box.set_margin_bottom(6)
+        box.set_margin_start(6)
+        box.set_margin_end(6)
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        metric = Gtk.ComboBoxText()
+        metric.append("codec", "Кодек")
+        metric.append("track_count", "Количество аудиодорожек")
+        metric.set_active_id("codec")
+        all_files = Gtk.CheckButton(label="По всем файлам")
+        all_files.set_active(True)
+        controls.pack_start(metric, False, False, 0)
+        controls.pack_start(all_files, False, False, 0)
+        box.pack_start(controls, False, False, 0)
+        chart_holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.pack_start(chart_holder, True, True, 0)
+
+        def refresh(*_args):
+            for child in chart_holder.get_children():
+                chart_holder.remove(child)
+            data = self._stats_audio(metric.get_active_id() or "codec", all_files.get_active())
+            chart_holder.pack_start(self._build_pie_chart(data, "Аудио"), True, True, 0)
+            chart_holder.show_all()
+
+        metric.connect("changed", refresh)
+        all_files.connect("toggled", refresh)
+        refresh()
+        return box
+
+    def _stats_titles_by_year(self) -> dict:
+        rows = self.db.conn.execute("SELECT created_at, year_start FROM titles").fetchall()
+        data = {}
+        for row in rows:
+            year = ""
+            if row["created_at"]:
+                year = str(row["created_at"])[:4]
+            if not year or not year.isdigit():
+                year_start = row["year_start"]
+                year = str(year_start) if year_start else "Неизвестно"
+            data[year] = data.get(year, 0) + 1
+        return dict(sorted(data.items(), key=lambda i: i[0]))
+
+    def _stats_tags(self) -> dict:
+        rows = self.db.conn.execute("SELECT tags FROM titles").fetchall()
+        data = {}
+        for row in rows:
+            raw = row["tags"] or ""
+            parts = [p.strip() for p in raw.replace(",", ";").split(";") if p.strip()]
+            for tag in parts:
+                data[tag] = data.get(tag, 0) + 1
+        return dict(sorted(data.items(), key=lambda i: i[1], reverse=True))
+
+    def _stats_statuses(self) -> dict:
+        rows = self.db.conn.execute("SELECT status_json FROM titles").fetchall()
+        data = {}
+        for row in rows:
+            try:
+                status = json.loads(row["status_json"] or "{}")
+            except json.JSONDecodeError:
+                status = {}
+            for key, enabled in status.items():
+                if enabled:
+                    data[key] = data.get(key, 0) + 1
+        return dict(sorted(data.items(), key=lambda i: i[1], reverse=True))
+
+    def _video_feature(self, media_path: str) -> dict:
+        details = MediaInfo.get_details(media_path)
+        video_tracks = [t for t in details.get("tracks", []) if t.get("type") == "Video"]
+        audio_tracks = [t for t in details.get("tracks", []) if t.get("type") == "Audio"]
+        general_tracks = [t for t in details.get("tracks", []) if t.get("type") == "General"]
+        v = video_tracks[0] if video_tracks else {}
+        g = general_tracks[0] if general_tracks else {}
+        resolution = ""
+        if v.get("width") and v.get("height"):
+            resolution = f"{v.get('width')}x{v.get('height')}"
+        return {
+            "resolution": resolution or "Неизвестно",
+            "codec": v.get("format", "") or "Неизвестно",
+            "container": g.get("format", "") or "Неизвестно",
+            "audio_codec": (audio_tracks[0].get("format", "") if audio_tracks else "") or "Неизвестно",
+            "audio_track_count": str(len(audio_tracks)),
+        }
+
+    def _stats_video(self, metric: str, all_files: bool) -> dict:
+        rows = self.db.conn.execute(
+            "SELECT id, title_id, path FROM media WHERE media_type='video' ORDER BY title_id, sort_order, id"
+        ).fetchall()
+        if all_files:
+            data = {}
+            for row in rows:
+                f = self._video_feature(row["path"])
+                key = f.get(metric, "Неизвестно")
+                data[key] = data.get(key, 0) + 1
+            return dict(sorted(data.items(), key=lambda i: i[1], reverse=True))
+        grouped = {}
+        order = {}
+        for row in rows:
+            f = self._video_feature(row["path"])
+            key = f.get(metric, "Неизвестно")
+            tid = row["title_id"]
+            grouped.setdefault(tid, {})
+            grouped[tid][key] = grouped[tid].get(key, 0) + 1
+            order.setdefault(tid, []).append(key)
+        out = {}
+        for tid, counts in grouped.items():
+            max_count = max(counts.values())
+            candidates = [k for k, v in counts.items() if v == max_count]
+            choice = candidates[0]
+            if metric == "resolution":
+                def res_score(value: str):
+                    if "x" in value:
+                        try:
+                            w, h = value.lower().split("x", 1)
+                            return int(w) * int(h)
+                        except ValueError:
+                            return -1
+                    return -1
+                choice = max(candidates, key=res_score)
+            else:
+                for key in order[tid]:
+                    if key in candidates:
+                        choice = key
+                        break
+            out[choice] = out.get(choice, 0) + 1
+        return dict(sorted(out.items(), key=lambda i: i[1], reverse=True))
+
+    def _stats_audio(self, metric: str, all_files: bool) -> dict:
+        video_metric = "audio_codec" if metric == "codec" else "audio_track_count"
+        return self._stats_video(video_metric, all_files)
+
+    def _build_pie_chart(self, data: dict, title: str) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        title_label = Gtk.Label(label=title)
+        title_label.set_xalign(0)
+        box.pack_start(title_label, False, False, 0)
+        area = Gtk.DrawingArea()
+        area.set_size_request(700, 420)
+
+        def on_draw(_w, cr):
+            width = area.get_allocated_width()
+            height = area.get_allocated_height()
+            if not data:
+                cr.move_to(20, 20)
+                cr.show_text("Нет данных")
+                return False
+            total = float(sum(data.values()))
+            cx = min(width * 0.35, 250)
+            cy = height * 0.5
+            radius = min(width, height) * 0.25
+            start = 0.0
+            palette = self._chart_palette(len(data))
+            items = list(data.items())
+            for idx, (name, value) in enumerate(items):
+                frac = value / total
+                end = start + frac * 2 * math.pi
+                cr.set_source_rgb(*palette[idx])
+                cr.move_to(cx, cy)
+                cr.arc(cx, cy, radius, start, end)
+                cr.close_path()
+                cr.fill()
+                start = end
+            legend_x = cx + radius + 30
+            legend_y = 30
+            for idx, (name, value) in enumerate(items[:14]):
+                cr.set_source_rgb(*palette[idx])
+                cr.rectangle(legend_x, legend_y + idx * 24, 16, 16)
+                cr.fill()
+                cr.set_source_rgb(1, 1, 1)
+                percent = (value / total) * 100
+                cr.move_to(legend_x + 24, legend_y + 13 + idx * 24)
+                cr.show_text(f"{name}: {value} ({percent:.1f}%)")
+            return False
+
+        area.connect("draw", on_draw)
+        box.pack_start(area, True, True, 0)
+        return box
+
+    def _build_bar_chart(self, data: dict, title: str) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        title_label = Gtk.Label(label=title)
+        title_label.set_xalign(0)
+        box.pack_start(title_label, False, False, 0)
+        area = Gtk.DrawingArea()
+        area.set_size_request(760, 420)
+
+        def on_draw(_w, cr):
+            width = area.get_allocated_width()
+            height = area.get_allocated_height()
+            if not data:
+                cr.move_to(20, 20)
+                cr.show_text("Нет данных")
+                return False
+            items = list(data.items())
+            max_val = max(data.values()) or 1
+            left = 50
+            bottom = height - 40
+            chart_w = width - 80
+            chart_h = height - 80
+            bar_w = max(10, chart_w / max(len(items), 1) * 0.7)
+            gap = chart_w / max(len(items), 1)
+            palette = self._chart_palette(len(items))
+            for idx, (name, value) in enumerate(items):
+                x = left + idx * gap
+                h = (value / max_val) * chart_h
+                y = bottom - h
+                cr.set_source_rgb(*palette[idx])
+                cr.rectangle(x, y, bar_w, h)
+                cr.fill()
+                cr.set_source_rgb(1, 1, 1)
+                cr.move_to(x, bottom + 15)
+                cr.show_text(str(name))
+                cr.move_to(x, y - 4)
+                cr.show_text(str(value))
+            return False
+
+        area.connect("draw", on_draw)
+        box.pack_start(area, True, True, 0)
+        return box
+
+    def _chart_palette(self, size: int) -> list:
+        palette = []
+        for idx in range(max(size, 1)):
+            hue = idx / max(size, 1)
+            r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
+            palette.append((r, g, b))
+        return palette
 
     def open_settings_dialog(self) -> None:
         dialog = Gtk.Dialog(title="Настройки", transient_for=self, modal=True)
@@ -2273,8 +2586,6 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.episodes_spin.set_value(int(episodes_value))
         else:
             self.episodes_spin.set_value(0)
-        # if "total_duration" in data:
-        #    self.duration_entry.set_text(data.get("total_duration", ""))
         self.description_buffer.set_text(data.get("description", ""))
         self.info_entries["Страна"].set_text(data.get("country", "Япония"))
         self.info_entries["Производство"].set_text(data.get("production", ""))
@@ -2284,12 +2595,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         )
         self.info_entries["Автор сценария/оригинала"].set_text(data.get("author", ""))
         self.info_entries["Композитор"].set_text(data.get("composer", ""))
-        # self.info_entries["Автор субтитров"].set_text(data.get("subtitles_author", ""))
-        # self.info_entries["Автор озвучки"].set_text(data.get("voice_author", ""))
-        # self.title_comment_buffer.set_text(data.get("title_comment", ""))
         self.tags_entry.set_text(data.get("tags", ""))
-        # if "url" in data:
-        #    self.url_entry.set_text(data.get("url", ""))
         cover_path = data.get("cover_path", "")
         if cover_path:
             self.cover_path = cover_path
