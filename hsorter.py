@@ -1464,6 +1464,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         filter_images.add_mime_type("image/jpeg")
         filter_images.add_mime_type("image/bmp")
         filter_images.add_mime_type("image/gif")
+        filter_images.add_mime_type("image/webp")
         dialog.add_filter(filter_images)
         if dialog.run() == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
@@ -1547,7 +1548,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not self.current_title_id:
             self._message("Нет тайтла", "Сначала выберите тайтл.")
             return
-        paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp"])
+        paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp", "image/webp", "image/gif"])
         for path in paths:
             cached_path = self._cache_image(path)
             self.db.add_media(self.current_title_id, "image", cached_path, "")
