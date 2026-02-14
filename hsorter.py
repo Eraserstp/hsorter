@@ -1821,11 +1821,41 @@ class HSorterWindow(Gtk.ApplicationWindow):
         notebook = Gtk.Notebook()
         content.add(notebook)
 
-        notebook.append_page(self._build_titles_stats_tab(), Gtk.Label(label="Тайтлы"))
-        notebook.append_page(self._build_tags_stats_tab(), Gtk.Label(label="Теги"))
-        notebook.append_page(self._build_status_stats_tab(), Gtk.Label(label="Статусы"))
-        notebook.append_page(self._build_video_stats_tab(), Gtk.Label(label="Видео"))
-        notebook.append_page(self._build_audio_stats_tab(), Gtk.Label(label="Аудио"))
+        tabs = [
+            ("Тайтлы", self._build_titles_stats_tab, False),
+            ("Теги", self._build_tags_stats_tab, False),
+            ("Статусы", self._build_status_stats_tab, False),
+            ("Видео", self._build_video_stats_tab, True),
+            ("Аудио", self._build_audio_stats_tab, True),
+        ]
+        containers = []
+        built_tabs = set()
+
+        def build_tab(index: int) -> None:
+            if index in built_tabs:
+                return
+            container = containers[index]
+            for child in container.get_children():
+                container.remove(child)
+            widget = tabs[index][1]()
+            container.pack_start(widget, True, True, 0)
+            container.show_all()
+            built_tabs.add(index)
+
+        for index, (title, _builder, lazy) in enumerate(tabs):
+            container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            containers.append(container)
+            if lazy:
+                placeholder = Gtk.Label(label="Статистика будет загружена при открытии вкладки")
+                placeholder.set_margin_top(12)
+                placeholder.set_margin_bottom(12)
+                placeholder.set_xalign(0)
+                container.pack_start(placeholder, False, False, 0)
+            notebook.append_page(container, Gtk.Label(label=title))
+            if not lazy:
+                build_tab(index)
+
+        notebook.connect("switch-page", lambda _nb, _page, index: build_tab(index))
 
         dialog.show_all()
         dialog.run()
