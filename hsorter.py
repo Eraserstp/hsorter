@@ -10,12 +10,16 @@ import colorsys
 import hashlib
 import html
 import math
+import requests
+import time
+import random
 
 import gi
 import re
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 
 # Требуем конкретные версии GTK/GDK для корректной работы
 gi.require_version("Gtk", "3.0")
@@ -128,6 +132,16 @@ class Database:
                 hardsub INTEGER DEFAULT 0,
                 hardsub_language TEXT DEFAULT "",
                 FOREIGN KEY(media_id) REFERENCES media(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tag_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                position INTEGER NOT NULL,
+                search TEXT NOT NULL,
+                replace TEXT NOT NULL
             )
             """
         )
@@ -504,6 +518,35 @@ class Database:
             )
         self.conn.commit()
 
+    def get_tag_rules(self):
+        cur = self.conn.execute(
+            "SELECT id, position, search, replace "
+            "FROM tag_rules ORDER BY position;"
+        )
+        return cur.fetchall()
+
+
+    def replace_all_tag_rules(self, rules):
+        """
+        rules: list of dict:
+            [
+                {"search": "...", "replace": "..."},
+                ...
+            ]
+        Полностью заменяет список правил.
+        """
+
+        with self.conn:
+            self.conn.execute("DELETE FROM tag_rules;")
+
+            for pos, rule in enumerate(rules):
+                self.conn.execute(
+                    "INSERT INTO tag_rules (position, search, replace) "
+                    "VALUES (?, ?, ?);",
+                    (pos, rule["search"], rule["replace"]),
+                )
+
+
 
 # Извлечение информации о видео через pymediainfo или CLI mediainfo.
 class MediaInfo:
@@ -738,14 +781,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _build_library(self) -> None:
         system_menu = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         system_menu.set_margin_bottom(4)
+
+        # Кнопка настроек (шестерёнка)
         self.settings_button = Gtk.Button(label="⚙")
         self.settings_button.set_size_request(36, 36)
         self.settings_button.set_tooltip_text("Настройки")
         self.settings_button.connect("clicked", lambda _b: self.open_settings_dialog())
         self.tag_rules_button = Gtk.Button(label="🏷")
         self.tag_rules_button.set_size_request(36, 36)
-        self.tag_rules_button.set_tooltip_text("Правила тегов")
-        self.tag_rules_button.connect("clicked", lambda _b: self.open_tag_rules_dialog())
+        self.tag_rules_button.set_tooltip_text("Управление правилами тегов")
+        self.tag_rules_button.connect("clicked", lambda _b: self.open_tagrules_dialog())
         self.stats_button = Gtk.Button(label="S")
         self.stats_button.set_size_request(36, 36)
         self.stats_button.set_tooltip_text("Статистика")
@@ -1372,13 +1417,39 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         if response != Gtk.ResponseType.OK or not new_tag:
             return
+
+        # 1. Собираем все текущие теги из поля
         current = self.tags_entry.get_text().strip()
+        tags = []
         if current:
-            tags = [t.strip() for t in current.split(",") if t.strip()]
-            tags.append(new_tag)
-            self.tags_entry.set_text(", ".join(sorted(set(tags))))
-        else:
-            self.tags_entry.set_text(new_tag)
+            tags = [t.strip() for t in current.split(";") if t.strip()]
+        tags.append(new_tag)  # добавляем новый тег
+
+        # 2. Загружаем правила замены из БД
+        rules = self.db.get_tag_rules()  # возвращает список словарей или кортежей
+        # Преобразуем в удобный формат: список пар (search, replace)
+        rule_pairs = [(row["search"], row["replace"]) for row in rules]
+
+        # 3. Применяем правила к каждому тегу
+        processed_tags = []
+        for tag in tags:
+            current_tag = tag.replace("-- TO BE SPLIT AND DELETED", "")
+            for search, replace in rule_pairs:
+                if current_tag == search:
+                    if replace == "":
+                        # Пустая замена → удаляем тег (прерываем обработку)
+                        current_tag = None
+                        break
+                    else:
+                        current_tag = replace
+                        # после замены продолжаем проверять следующие правила
+            if current_tag is not None and current_tag != "":
+                processed_tags.append(current_tag)
+
+        # 4. Убираем дубликаты и сортируем
+        unique_tags = sorted(set(processed_tags))
+        self.tags_entry.set_text("; ".join(unique_tags))
+
         self._mark_dirty()
 
     # Выбор обложки через файловый диалог.
@@ -1394,6 +1465,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         filter_images.add_mime_type("image/jpeg")
         filter_images.add_mime_type("image/bmp")
         filter_images.add_mime_type("image/gif")
+        filter_images.add_mime_type("image/webp")
         dialog.add_filter(filter_images)
         if dialog.run() == Gtk.ResponseType.OK:
             filename = dialog.get_filename()
@@ -1478,6 +1550,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self._message("Нет тайтла", "Сначала выберите тайтл.")
             return
         paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp"])
+        paths = self._pick_files("Выберите изображения", ["image/png", "image/jpeg", "image/bmp", "image/webp", "image/gif"])
         for path in paths:
             cached_path = self._cache_image(path)
             self.db.add_media(self.current_title_id, "image", cached_path, "")
@@ -1488,7 +1561,17 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if not self.current_title_id:
             self._message("Нет тайтла", "Сначала выберите тайтл.")
             return
-        paths = self._pick_files("Выберите видео", ["video/x-matroska", "video/mp4", "video/quicktime"])
+        paths = self._pick_files(
+            "Выберите видео",
+            [
+                "video/x-matroska",
+                "video/mp4",
+                "video/quicktime",
+                "video/x-msvideo",      # AVI
+                "video/x-ms-wmv",       # WMV
+                "video/mpeg"            # MPG / MPEG
+            ]
+        )
         for path in paths:
             info = MediaInfo.describe_video(path)
             self.db.add_media(self.current_title_id, "video", path, info)
@@ -1728,9 +1811,6 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "username": self.db.get_setting("anidb_username") or "",
             "password": self.db.get_setting("anidb_password") or "",
         }
-
-    def open_tag_rules_dialog(self) -> None:
-        self._message("Правила тегов", "Раздел правил тегов будет добавлен отдельно.")
 
     def open_statistics_dialog(self) -> None:
         dialog = Gtk.Dialog(title="Статистика", transient_for=self, modal=True)
@@ -2083,6 +2163,122 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.set_setting("anidb_password", password_entry.get_text())
         dialog.destroy()
 
+
+    def open_tagrules_dialog(self):
+        dialog = Gtk.Dialog(
+            title="Правила замены тегов",
+            transient_for=self,
+            flags=0
+        )
+        dialog.set_default_size(600, 400)
+
+        dialog.add_buttons(
+            "Отмена", Gtk.ResponseType.CANCEL,
+            "Сохранить", Gtk.ResponseType.OK
+        )
+
+        content = dialog.get_content_area()
+
+        # Только search / replace
+        store = Gtk.ListStore(str, str)
+
+        # --- загрузка из БД ---
+        for row in self.db.get_tag_rules():
+            store.append([row["search"], row["replace"]])
+
+        treeview = Gtk.TreeView(model=store)
+        treeview.set_grid_lines(Gtk.TreeViewGridLines.BOTH)
+
+        # ---- Колонка поиска ----
+        renderer_search = Gtk.CellRendererText(editable=True)
+
+        def on_search_edited(renderer, path, text):
+            store[path][0] = text
+
+        renderer_search.connect("edited", on_search_edited)
+
+        column_search = Gtk.TreeViewColumn("Поиск", renderer_search, text=0)
+        column_search.set_resizable(True)
+        column_search.set_expand(True)
+        column_search.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        column_search.set_fixed_width(250)
+
+        treeview.append_column(column_search)
+
+
+        # ---- Колонка замены ----
+        renderer_replace = Gtk.CellRendererText(editable=True)
+
+        def on_replace_edited(renderer, path, text):
+            store[path][1] = text
+
+        renderer_replace.connect("edited", on_replace_edited)
+
+        column_replace = Gtk.TreeViewColumn("Замена", renderer_replace, text=1)
+        column_replace.set_resizable(True)
+        column_replace.set_expand(True)
+        column_replace.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+        column_replace.set_fixed_width(250)
+
+        treeview.append_column(column_replace)
+
+        # ---- Drag & Drop порядок ----
+        treeview.set_reorderable(True)
+
+        # ---- Scroll ----
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_hexpand(True)
+        scrolled.set_vexpand(True)
+        scrolled.add(treeview)
+
+        content.pack_start(scrolled, True, True, 0)
+
+        # ---- Кнопки добавить/удалить ----
+        button_box = Gtk.Box(spacing=6)
+
+        def on_add_clicked(button):
+            store.append(["", ""])
+
+        def on_delete_clicked(button):
+            selection = treeview.get_selection()
+            model, treeiter = selection.get_selected()
+            if treeiter:
+                model.remove(treeiter)
+
+        add_button = Gtk.Button(label="Добавить")
+        add_button.connect("clicked", on_add_clicked)
+
+        delete_button = Gtk.Button(label="Удалить")
+        delete_button.connect("clicked", on_delete_clicked)
+
+        button_box.pack_start(add_button, False, False, 0)
+        button_box.pack_start(delete_button, False, False, 0)
+
+        content.pack_start(button_box, False, False, 6)
+
+        dialog.show_all()
+        response = dialog.run()
+
+        # ---- Сохранение ----
+        if response == Gtk.ResponseType.OK:
+
+            rules = []
+            for row in store:
+                search = row[0].strip()
+                replace = row[1].strip()
+
+                # можно пропускать полностью пустые строки
+                if search or replace:
+                    rules.append({
+                        "search": search,
+                        "replace": replace
+                    })
+
+            self.db.replace_all_tag_rules(rules)
+
+        dialog.destroy()
+
+
     def _fetch_anidb_data(self, anime_id: str) -> dict | None:
         settings = self._get_anidb_settings()
         missing = [key for key, value in settings.items() if not value]
@@ -2157,8 +2353,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 main_title = value
             elif title_type == "official" and not official_title:
                 official_title = value
-            elif title_type == "synonym" and lang in {"ja", "en", "ru"}:
-                synonyms.append(value)
+            elif title_type == "synonym" and lang in {"x-jat", "ja", "en", "ru"}:
+                if value != main_title:
+                    synonyms.append(value)
         if not main_title:
             main_title = official_title
         alt_titles_parts = []
@@ -2175,11 +2372,46 @@ class HSorterWindow(Gtk.ApplicationWindow):
         rating_value = (anime_node.findtext("ratings/permanent") or "").strip()
         cover_path = self._download_anidb_cover(anime_node)
         tags = []
+        character_ids = []
+        char_tags = []
         for tag in anime_node.findall("tags/tag"):
+            weight = tag.attrib.get("weight", "0")  # получаем значение weight (по умолчанию "0")
+            if weight == "0":  # пропускаем теги с weight = 0
+                continue
             name = (tag.findtext("name") or "").strip()
             if name:
                 tags.append(name)
-        tags_value = "; ".join(sorted(set(tags)))
+        for singlechar in anime_node.findall("characters/character"):
+            char_id = singlechar.attrib.get("id", None)  # получаем значение weight (по умолчанию "None")
+            if char_id != None:
+                character_ids.append(char_id)
+        if len(character_ids)>0:
+            tags = list(dict.fromkeys(tags + self._extract_anidb_characters_tags(character_ids)))
+
+        # Прогоняем полученный список через правила обработки
+        # 1. Загружаем правила замены из БД
+        rules = self.db.get_tag_rules()  # возвращает список словарей или кортежей
+        # 2. Преобразуем в удобный формат: список пар (search, replace)
+        rule_pairs = [(row["search"], row["replace"]) for row in rules]
+        # 3. Применяем правила к каждому тегу
+        processed_tags = []
+        for tag in tags:
+            current_tag = tag.replace("-- TO BE SPLIT AND DELETED", "")
+            for search, replace in rule_pairs:
+                if current_tag == search:
+                    if replace == "":
+                        # Пустая замена → удаляем тег (прерываем обработку)
+                        current_tag = None
+                        break
+                    else:
+                        current_tag = replace
+                        # после замены продолжаем проверять следующие правила
+            if current_tag is not None and current_tag != "":
+                processed_tags.append(current_tag)
+
+        # 4. Убираем дубликаты и сортируем
+        unique_tags = sorted(set(processed_tags))
+        tags_value = "; ".join(unique_tags)
         creators = {
             "Animation Work": [],
             "Direction": [],
@@ -2218,6 +2450,62 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "cover_path": cover_path or "",
         }
         return data
+
+    def _extract_anidb_characters_tags(self, character_ids):
+        """
+        Извлекает имена тегов AniDB для списка идентификаторов персонажей.
+        Это метод класса, поэтому первым параметром идет self.
+        
+        Args:
+            character_ids (list): Список идентификаторов персонажей AniDB
+            
+        Returns:
+            list: Список уникальных имен тегов AniDB для всех персонажей
+        """
+       
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        all_tags = []
+        
+        for index, character_id in enumerate(character_ids, 1):
+            try:
+                url = f"https://anidb.net/character/{character_id}"
+                print(f"Запрашиваю данные для персонажа ID: {character_id}")
+                
+                response = requests.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Находим все span с классом "tagname"
+                tag_spans = soup.find_all('span', class_='tagname')
+                
+                # Извлекаем текстовое содержимое каждого span
+                tags = [span.get_text(strip=True) for span in tag_spans]
+                
+                # Добавляем теги в общий список
+                all_tags.extend(tags)
+                
+                print(f"  Найдено тегов: {len(tags)}")
+                
+                # Случайная задержка между запросами (1.0 - 3.0 секунды)
+                if index < len(character_ids):  # Не ставим задержку после последнего запроса
+                    delay = random.uniform(1.0, 3.0)
+                    print(f"  Задержка перед следующим запросом: {delay} сек.")
+                    time.sleep(delay)
+                
+            except requests.exceptions.RequestException as e:
+                print(f"  Ошибка при запросе ID {character_id}: {e}")
+            except Exception as e:
+                print(f"  Неожиданная ошибка для ID {character_id}: {e}")
+        
+        # Удаляем дубликаты, сохраняя порядок
+        unique_tags = list(dict.fromkeys(all_tags))
+        
+        print(f"\nВсего уникальных тегов найдено: {len(unique_tags)}")
+        return unique_tags
 
     def _download_anidb_cover(self, anime_node: ET.Element) -> str:
         picture_name = (anime_node.findtext("picture") or "").strip()
@@ -2298,10 +2586,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.episodes_spin.set_value(int(episodes_value))
         else:
             self.episodes_spin.set_value(0)
-        if "total_duration" in data:
-            self.duration_entry.set_text(data.get("total_duration", ""))
         self.description_buffer.set_text(data.get("description", ""))
-        self.info_entries["Страна"].set_text(data.get("country", ""))
+        self.info_entries["Страна"].set_text(data.get("country", "Япония"))
         self.info_entries["Производство"].set_text(data.get("production", ""))
         self.info_entries["Режиссёр"].set_text(data.get("director", ""))
         self.info_entries["Дизайнер персонажей"].set_text(
@@ -2309,12 +2595,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         )
         self.info_entries["Автор сценария/оригинала"].set_text(data.get("author", ""))
         self.info_entries["Композитор"].set_text(data.get("composer", ""))
-        self.info_entries["Автор субтитров"].set_text(data.get("subtitles_author", ""))
-        self.info_entries["Автор озвучки"].set_text(data.get("voice_author", ""))
-        self.title_comment_buffer.set_text(data.get("title_comment", ""))
         self.tags_entry.set_text(data.get("tags", ""))
-        if "url" in data:
-            self.url_entry.set_text(data.get("url", ""))
         cover_path = data.get("cover_path", "")
         if cover_path:
             self.cover_path = cover_path
