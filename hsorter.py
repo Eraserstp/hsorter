@@ -1482,37 +1482,34 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         # 1. Собираем все текущие теги из поля
         current = self.tags_entry.get_text().strip()
-        tags = []
-        if current:
-            tags = [t.strip() for t in current.split(";") if t.strip()]
-        tags.append(new_tag)  # добавляем новый тег
+        tags = self._normalize_tag_tokens(current)
+        tags.append(new_tag)
+        processed_tags = self._apply_tag_rules(tags)
+        unique_tags = sorted(set(processed_tags))
+        self.tags_entry.set_text("; ".join(unique_tags))
 
-        # 2. Загружаем правила замены из БД
-        rules = self.db.get_tag_rules()  # возвращает список словарей или кортежей
-        # Преобразуем в удобный формат: список пар (search, replace)
+        self._mark_dirty()
+
+    def _normalize_tag_tokens(self, raw_tags: str) -> list[str]:
+        normalized = (raw_tags or "").replace(",", ";")
+        parts = [part.strip() for part in normalized.split(";") if part.strip()]
+        return parts
+
+    def _apply_tag_rules(self, tags: list[str]) -> list[str]:
+        rules = self.db.get_tag_rules()
         rule_pairs = [(row["search"], row["replace"]) for row in rules]
-
-        # 3. Применяем правила к каждому тегу
         processed_tags = []
         for tag in tags:
             current_tag = tag.replace("-- TO BE SPLIT AND DELETED", "")
             for search, replace in rule_pairs:
                 if current_tag == search:
                     if replace == "":
-                        # Пустая замена → удаляем тег (прерываем обработку)
                         current_tag = None
                         break
-                    else:
-                        current_tag = replace
-                        # после замены продолжаем проверять следующие правила
+                    current_tag = replace
             if current_tag is not None and current_tag != "":
                 processed_tags.append(current_tag)
-
-        # 4. Убираем дубликаты и сортируем
-        unique_tags = sorted(set(processed_tags))
-        self.tags_entry.set_text("; ".join(unique_tags))
-
-        self._mark_dirty()
+        return processed_tags
 
     # Выбор обложки через файловый диалог.
     def pick_cover(self) -> None:
@@ -2038,6 +2035,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         thumbs_button = Gtk.Button(label="Создать недостающие миниатюры")
         thumbs_button.connect("clicked", lambda _b: self.create_missing_thumbnails())
         content.add(thumbs_button)
+        validate_tags_button = Gtk.Button(label="Валидация тегов")
+        validate_tags_button.connect("clicked", lambda _b: self.validate_tags())
+        content.add(validate_tags_button)
         dialog.show_all()
         dialog.run()
         dialog.destroy()
@@ -2157,6 +2157,65 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if close_button:
                 close_button.set_sensitive(True)
 
+        dialog.run()
+        dialog.destroy()
+
+    def validate_tags(self) -> None:
+        rows = self.db.conn.execute("SELECT id, tags FROM titles ORDER BY id").fetchall()
+
+        dialog = Gtk.Dialog(title="Валидация тегов", transient_for=self, modal=True)
+        dialog.set_deletable(False)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        close_button = dialog.get_widget_for_response(Gtk.ResponseType.CLOSE)
+        if close_button:
+            close_button.set_sensitive(False)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        status_label = Gtk.Label(label="Подготовка...")
+        status_label.set_xalign(0)
+        progress = Gtk.ProgressBar()
+        progress.set_show_text(True)
+        content.add(status_label)
+        content.add(progress)
+        dialog.show_all()
+
+        total = len(rows)
+        updated = 0
+
+        def set_progress(message: str, done: int) -> None:
+            status_label.set_text(message)
+            fraction = 1.0 if total == 0 else min(1.0, done / total)
+            progress.set_fraction(fraction)
+            progress.set_text(f"{done}/{total}")
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        for idx, row in enumerate(rows, start=1):
+            raw = row["tags"] or ""
+            tags = self._normalize_tag_tokens(raw)
+            tags = self._apply_tag_rules(tags)
+            tags = [tag.strip().lower() for tag in tags if tag and tag.strip()]
+            validated = "; ".join(sorted(set(tags)))
+            if validated != raw.strip():
+                self.db.conn.execute("UPDATE titles SET tags=?, updated_at=? WHERE id=?", (
+                    validated,
+                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    row["id"],
+                ))
+                updated += 1
+            set_progress(f"Валидация тегов: {idx}/{total}", idx)
+        self.db.conn.commit()
+
+        status_label.set_text(f"Готово. Обновлено тайтлов: {updated}.")
+        progress.set_fraction(1.0 if total else 0.0)
+        progress.set_text(f"{total}/{total}" if total else "0/0")
+        if close_button:
+            close_button.set_sensitive(True)
+        self.refresh_titles()
         dialog.run()
         dialog.destroy()
 
