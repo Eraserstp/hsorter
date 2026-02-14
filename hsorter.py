@@ -3179,10 +3179,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         copy_button = Gtk.Button(label="Копировать")
+        merge_button = Gtk.Button(label="Слияние")
         copy_all_button = Gtk.Button(label="Копировать всё")
         prev_button = Gtk.Button(label="Назад")
         next_button = Gtk.Button(label="Далее")
         action_row.pack_start(copy_button, False, False, 0)
+        action_row.pack_start(merge_button, False, False, 0)
         action_row.pack_start(copy_all_button, False, False, 0)
         action_row.pack_end(next_button, False, False, 0)
         action_row.pack_end(prev_button, False, False, 0)
@@ -3205,6 +3207,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             remote_value = anidb_data.get(key, "")
             local_buffer.set_text(local_value)
             remote_buffer.set_text(remote_value)
+            merge_button.set_sensitive(key == "tags")
             if multiline:
                 local_view.set_size_request(-1, 180)
                 remote_view.set_size_request(-1, 180)
@@ -3235,6 +3238,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
             data[key] = anidb_data.get(key, "")
             local_buffer.set_text(data[key])
 
+        def merge_current() -> None:
+            key, _, _ = fields[index]
+            if key != "tags":
+                return
+            local_raw = local_buffer.get_text(
+                local_buffer.get_start_iter(),
+                local_buffer.get_end_iter(),
+                True,
+            )
+            local_tags = self._normalize_tag_tokens(local_raw)
+            remote_tags = self._normalize_tag_tokens(anidb_data.get("tags", ""))
+            merged = sorted(set(local_tags + remote_tags))
+            data["tags"] = "; ".join(merged)
+            local_buffer.set_text(data["tags"])
+
         def copy_all() -> None:
             if not self._confirm(
                 "Скопировать всё", "Данные тайтла будут перезаписаны целиком! Продолжить?"
@@ -3261,6 +3279,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 dialog.response(Gtk.ResponseType.OK)
 
         copy_button.connect("clicked", lambda _b: copy_current())
+        merge_button.connect("clicked", lambda _b: merge_current())
         copy_all_button.connect("clicked", lambda _b: copy_all())
         prev_button.connect("clicked", lambda _b: go_prev())
         next_button.connect("clicked", lambda _b: go_next())
