@@ -2209,6 +2209,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 updated += 1
             set_progress(f"Валидация тегов: {idx}/{total}", idx)
         self.db.conn.commit()
+        self.db.replace_stats_cache("tags", "all", True, self._compute_tags())
+        self.db.set_setting("stats_cache_updated_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
         status_label.set_text(f"Готово. Обновлено тайтлов: {updated}.")
         progress.set_fraction(1.0 if total else 0.0)
@@ -2312,14 +2314,30 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
 
     def _stats_titles_by_year(self) -> dict:
-        data = self.db.get_stats_cache("titles", "by_year", True)
+        data = self._stats_with_fallback("titles", "by_year", True, self._compute_titles_by_year)
         return dict(sorted(data.items(), key=lambda i: i[0]))
 
     def _stats_tags(self) -> dict:
-        return self.db.get_stats_cache("tags", "all", True)
+        return self._stats_with_fallback("tags", "all", True, self._compute_tags)
 
     def _stats_statuses(self) -> dict:
-        return self.db.get_stats_cache("statuses", "all", True)
+        return self._stats_with_fallback("statuses", "all", True, self._compute_statuses)
+
+    def _stats_with_fallback(
+        self,
+        category: str,
+        metric: str,
+        all_files: bool,
+        compute_fn,
+    ) -> dict:
+        data = self.db.get_stats_cache(category, metric, all_files)
+        if data:
+            return data
+        computed = compute_fn()
+        if computed:
+            self.db.replace_stats_cache(category, metric, all_files, computed)
+            self.db.set_setting("stats_cache_updated_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+        return computed
 
     def _compute_titles_by_year(self) -> dict:
         rows = self.db.conn.execute("SELECT created_at, year_start FROM titles").fetchall()
