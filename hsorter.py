@@ -821,6 +821,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.library_box.set_size_request(100, -1)
         self.details_box.set_size_request(100, -1)
         self.media_box.set_size_request(100, -1)
+        self.details_box.set_margin_start(6)
 
         self.main_paned.add1(self.library_box)
         self.right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
