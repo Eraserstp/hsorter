@@ -848,7 +848,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.tag_rules_button.set_size_request(36, 36)
         self.tag_rules_button.set_tooltip_text("Управление правилами тегов")
         self.tag_rules_button.connect("clicked", lambda _b: self.open_tagrules_dialog())
-        self.stats_button = Gtk.Button(label="S")
+        self.stats_button = Gtk.Button(label="📊")
         self.stats_button.set_size_request(36, 36)
         self.stats_button.set_tooltip_text("Статистика")
         self.stats_button.connect("clicked", lambda _b: self.open_statistics_dialog())
@@ -873,18 +873,44 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         self.filter_name = Gtk.Entry()
         self.filter_tags = Gtk.Entry()
-        self.filter_status = Gtk.Entry()
+        self.filter_status_checks = {}
+        self.filter_status_button = Gtk.MenuButton(label="Статусы")
+        filter_status_popover = Gtk.Popover.new(self.filter_status_button)
+        filter_status_popover.set_position(Gtk.PositionType.BOTTOM)
+        filter_status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        filter_status_box.set_margin_top(6)
+        filter_status_box.set_margin_bottom(6)
+        filter_status_box.set_margin_start(6)
+        filter_status_box.set_margin_end(6)
+        filter_status_scroller = Gtk.ScrolledWindow()
+        filter_status_scroller.set_size_request(260, 180)
+        filter_status_scroller.add(filter_status_box)
+        filter_status_popover.add(filter_status_scroller)
+        for status in STATUS_OPTIONS:
+            check = self._build_status_check(status)
+            check.connect("toggled", self._on_filter_status_toggled)
+            self.filter_status_checks[status] = check
+            filter_status_box.pack_start(check, False, False, 0)
+        filter_status_popover.show_all()
+        filter_status_popover.hide()
+        self.filter_status_button.set_popover(filter_status_popover)
         self.filter_sort = Gtk.ComboBoxText()
         self.filter_sort.append("title", "По названию")
         self.filter_sort.append("created_at", "По дате добавления")
         self.filter_sort.set_active_id("title")
         filter_box.pack_start(self._row("Название", self.filter_name), False, False, 0)
         filter_box.pack_start(self._row("Теги", self.filter_tags), False, False, 0)
-        filter_box.pack_start(self._row("Статус", self.filter_status), False, False, 0)
+        filter_box.pack_start(self._row("Статус", self.filter_status_button), False, False, 0)
         filter_box.pack_start(self._row("Сортировка", self.filter_sort), False, False, 0)
         apply_button = Gtk.Button(label="Применить")
         apply_button.connect("clicked", lambda _b: self.refresh_titles())
-        filter_box.pack_start(apply_button, False, False, 0)
+        reset_button = Gtk.Button(label="Сбросить")
+        reset_button.connect("clicked", lambda _b: self.reset_filters())
+        filter_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        filter_buttons.pack_start(apply_button, True, True, 0)
+        filter_buttons.pack_start(reset_button, True, True, 0)
+        filter_box.pack_start(filter_buttons, False, False, 0)
+        self._update_filter_status_button_label()
         self.library_box.pack_start(filter_frame, False, False, 0)
 
         self.title_list = Gtk.ListBox()
@@ -1177,16 +1203,48 @@ class HSorterWindow(Gtk.ApplicationWindow):
         widget.drag_dest_set(Gtk.DestDefaults.ALL, [target], Gdk.DragAction.COPY)
         widget.connect("drag-data-received", handler)
 
+    def _get_selected_filter_statuses(self) -> list[str]:
+        return [status for status, check in self.filter_status_checks.items() if check.get_active()]
+
+    def _update_filter_status_button_label(self) -> None:
+        selected = self._get_selected_filter_statuses()
+        if not selected:
+            self.filter_status_button.set_label("Статусы")
+            return
+        self.filter_status_button.set_label(f"Статусы ({len(selected)})")
+
+    def _on_filter_status_toggled(self, _button: Gtk.CheckButton) -> None:
+        self._update_filter_status_button_label()
+
+    def reset_filters(self) -> None:
+        self.filter_name.set_text("")
+        self.filter_tags.set_text("")
+        for check in self.filter_status_checks.values():
+            check.set_active(False)
+        self.filter_sort.set_active_id("title")
+        self._update_filter_status_button_label()
+        self.refresh_titles()
+
     # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
         for row in self.title_list.get_children():
             self.title_list.remove(row)
+        selected_statuses = self._get_selected_filter_statuses()
         titles = self.db.list_titles(
             query=self.filter_name.get_text().strip(),
             tags=self.filter_tags.get_text().strip(),
-            status_filter=self.filter_status.get_text().strip(),
             sort_by=self.filter_sort.get_active_id() or "title",
         )
+        if selected_statuses:
+            filtered_titles = []
+            for title in titles:
+                try:
+                    status_data = json.loads(title["status_json"] or "{}")
+                except json.JSONDecodeError:
+                    status_data = {}
+                if any(bool(status_data.get(status)) for status in selected_statuses):
+                    filtered_titles.append(title)
+            titles = filtered_titles
         self.title_rows = []
         for title in titles:
             display = html.escape(self._truncate_title(title["main_title"]))
