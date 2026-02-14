@@ -145,6 +145,18 @@ class Database:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stats_cache (
+                category TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                all_files INTEGER NOT NULL DEFAULT 1,
+                bucket TEXT NOT NULL,
+                value INTEGER NOT NULL,
+                PRIMARY KEY(category, metric, all_files, bucket)
+            )
+            """
+        )
         if not self._column_exists("media", "sort_order"):
             cur.execute("ALTER TABLE media ADD COLUMN sort_order INTEGER DEFAULT 0")
         if not self._column_exists("media", "thumbnail_path"):
@@ -355,6 +367,51 @@ class Database:
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
             (key, value),
         )
+        self.conn.commit()
+
+    def replace_stats_cache(
+        self,
+        category: str,
+        metric: str,
+        all_files: bool,
+        data: dict[str, int],
+    ) -> None:
+        """Заменяет набор агрегированных значений статистики в кеше."""
+        cur = self.conn.cursor()
+        all_flag = 1 if all_files else 0
+        cur.execute(
+            "DELETE FROM stats_cache WHERE category=? AND metric=? AND all_files=?",
+            (category, metric, all_flag),
+        )
+        rows = [
+            (category, metric, all_flag, str(bucket), int(value))
+            for bucket, value in data.items()
+            if int(value) > 0
+        ]
+        if rows:
+            cur.executemany(
+                "INSERT INTO stats_cache (category, metric, all_files, bucket, value) VALUES (?,?,?,?,?)",
+                rows,
+            )
+        self.conn.commit()
+
+    def get_stats_cache(self, category: str, metric: str, all_files: bool) -> dict[str, int]:
+        """Читает агрегированную статистику из кеш-таблицы."""
+        cur = self.conn.cursor()
+        rows = cur.execute(
+            """
+            SELECT bucket, value FROM stats_cache
+            WHERE category=? AND metric=? AND all_files=?
+            ORDER BY value DESC, bucket COLLATE NOCASE
+            """,
+            (category, metric, 1 if all_files else 0),
+        ).fetchall()
+        return {row["bucket"]: int(row["value"]) for row in rows}
+
+    def clear_stats_cache(self) -> None:
+        """Очищает кеш агрегированной статистики."""
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM stats_cache")
         self.conn.commit()
 
     # Список медиафайлов по типу (image/video).
@@ -795,9 +852,14 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.stats_button.set_size_request(36, 36)
         self.stats_button.set_tooltip_text("Статистика")
         self.stats_button.connect("clicked", lambda _b: self.open_statistics_dialog())
+        self.maintenance_button = Gtk.Button(label="🛠")
+        self.maintenance_button.set_size_request(36, 36)
+        self.maintenance_button.set_tooltip_text("Обслуживание")
+        self.maintenance_button.connect("clicked", lambda _b: self.open_maintenance_dialog())
         system_menu.pack_start(self.settings_button, False, False, 0)
         system_menu.pack_start(self.tag_rules_button, False, False, 0)
         system_menu.pack_start(self.stats_button, False, False, 0)
+        system_menu.pack_start(self.maintenance_button, False, False, 0)
         system_menu.pack_start(Gtk.Box(), True, True, 0)
         self.library_box.pack_start(system_menu, False, False, 0)
 
@@ -1821,11 +1883,41 @@ class HSorterWindow(Gtk.ApplicationWindow):
         notebook = Gtk.Notebook()
         content.add(notebook)
 
-        notebook.append_page(self._build_titles_stats_tab(), Gtk.Label(label="Тайтлы"))
-        notebook.append_page(self._build_tags_stats_tab(), Gtk.Label(label="Теги"))
-        notebook.append_page(self._build_status_stats_tab(), Gtk.Label(label="Статусы"))
-        notebook.append_page(self._build_video_stats_tab(), Gtk.Label(label="Видео"))
-        notebook.append_page(self._build_audio_stats_tab(), Gtk.Label(label="Аудио"))
+        tabs = [
+            ("Тайтлы", self._build_titles_stats_tab, False),
+            ("Теги", self._build_tags_stats_tab, False),
+            ("Статусы", self._build_status_stats_tab, False),
+            ("Видео", self._build_video_stats_tab, True),
+            ("Аудио", self._build_audio_stats_tab, True),
+        ]
+        containers = []
+        built_tabs = set()
+
+        def build_tab(index: int) -> None:
+            if index in built_tabs:
+                return
+            container = containers[index]
+            for child in container.get_children():
+                container.remove(child)
+            widget = tabs[index][1]()
+            container.pack_start(widget, True, True, 0)
+            container.show_all()
+            built_tabs.add(index)
+
+        for index, (title, _builder, lazy) in enumerate(tabs):
+            container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            containers.append(container)
+            if lazy:
+                placeholder = Gtk.Label(label="Статистика будет загружена при открытии вкладки")
+                placeholder.set_margin_top(12)
+                placeholder.set_margin_bottom(12)
+                placeholder.set_xalign(0)
+                container.pack_start(placeholder, False, False, 0)
+            notebook.append_page(container, Gtk.Label(label=title))
+            if not lazy:
+                build_tab(index)
+
+        notebook.connect("switch-page", lambda _nb, _page, index: build_tab(index))
 
         dialog.show_all()
         dialog.run()
@@ -1925,7 +2017,157 @@ class HSorterWindow(Gtk.ApplicationWindow):
         refresh()
         return box
 
+    def open_maintenance_dialog(self) -> None:
+        dialog = Gtk.Dialog(title="Обслуживание", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        dialog.set_default_size(520, 240)
+        content = dialog.get_content_area()
+        content.set_spacing(10)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        content.add(
+            Gtk.Label(
+                label="Сервисные операции. Пересчёт обновляет статистику, сохранённую в базе данных."
+            )
+        )
+        recalc_button = Gtk.Button(label="Пересчитать статистику")
+        recalc_button.connect("clicked", lambda _b: self.recalculate_statistics())
+        content.add(recalc_button)
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
+    def recalculate_statistics(self) -> None:
+        dialog = Gtk.Dialog(title="Пересчёт статистики", transient_for=self, modal=True)
+        dialog.set_deletable(False)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        close_button = dialog.get_widget_for_response(Gtk.ResponseType.CLOSE)
+        if close_button:
+            close_button.set_sensitive(False)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        status_label = Gtk.Label(label="Подготовка...")
+        status_label.set_xalign(0)
+        progress = Gtk.ProgressBar()
+        progress.set_show_text(True)
+        content.add(status_label)
+        content.add(progress)
+        dialog.show_all()
+
+        total_steps = 7
+        done = 0
+
+        def set_progress(message: str, current_done: int, extra_total: int = 0) -> None:
+            total = total_steps + extra_total
+            fraction = 0.0 if total <= 0 else min(1.0, current_done / total)
+            status_label.set_text(message)
+            progress.set_fraction(fraction)
+            progress.set_text(f"{current_done}/{total}")
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        try:
+            set_progress("Тайтлы по годам...", done)
+            titles = self._compute_titles_by_year()
+            self.db.replace_stats_cache("titles", "by_year", True, titles)
+            done += 1
+            set_progress("Теги...", done)
+
+            tags = self._compute_tags()
+            self.db.replace_stats_cache("tags", "all", True, tags)
+            done += 1
+            set_progress("Статусы...", done)
+
+            statuses = self._compute_statuses()
+            self.db.replace_stats_cache("statuses", "all", True, statuses)
+            done += 1
+            set_progress("Чтение видеофайлов...", done)
+
+            rows = self.db.conn.execute(
+                "SELECT id, title_id, path FROM media WHERE media_type='video' ORDER BY title_id, sort_order, id"
+            ).fetchall()
+            total_video = len(rows)
+            features = []
+            for idx, row in enumerate(rows, start=1):
+                features.append({"title_id": row["title_id"], **self._video_feature(row["path"])})
+                set_progress(
+                    f"Анализ видеофайлов: {idx}/{total_video}",
+                    done + idx,
+                    total_video,
+                )
+            done += total_video
+
+            set_progress("Сохранение видео-статистики...", done, total_video)
+            for metric in ("resolution", "codec", "container"):
+                self.db.replace_stats_cache(
+                    "video",
+                    metric,
+                    True,
+                    self._aggregate_video_stats(features, metric, True),
+                )
+                self.db.replace_stats_cache(
+                    "video",
+                    metric,
+                    False,
+                    self._aggregate_video_stats(features, metric, False),
+                )
+            done += 1
+            set_progress("Сохранение аудио-статистики...", done, total_video)
+
+            self.db.replace_stats_cache(
+                "audio",
+                "codec",
+                True,
+                self._aggregate_video_stats(features, "audio_codec", True),
+            )
+            self.db.replace_stats_cache(
+                "audio",
+                "codec",
+                False,
+                self._aggregate_video_stats(features, "audio_codec", False),
+            )
+            self.db.replace_stats_cache(
+                "audio",
+                "track_count",
+                True,
+                self._aggregate_video_stats(features, "audio_track_count", True),
+            )
+            self.db.replace_stats_cache(
+                "audio",
+                "track_count",
+                False,
+                self._aggregate_video_stats(features, "audio_track_count", False),
+            )
+            done += 1
+            set_progress("Готово", done, total_video)
+            self.db.set_setting("stats_cache_updated_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+        except Exception as exc:
+            status_label.set_text(f"Ошибка пересчёта: {exc}")
+            progress.set_text("Ошибка")
+        finally:
+            if close_button:
+                close_button.set_sensitive(True)
+
+        dialog.run()
+        dialog.destroy()
+
     def _stats_titles_by_year(self) -> dict:
+        data = self.db.get_stats_cache("titles", "by_year", True)
+        return dict(sorted(data.items(), key=lambda i: i[0]))
+
+    def _stats_tags(self) -> dict:
+        return self.db.get_stats_cache("tags", "all", True)
+
+    def _stats_statuses(self) -> dict:
+        return self.db.get_stats_cache("statuses", "all", True)
+
+    def _compute_titles_by_year(self) -> dict:
         rows = self.db.conn.execute("SELECT created_at, year_start FROM titles").fetchall()
         data = {}
         for row in rows:
@@ -1936,9 +2178,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 year_start = row["year_start"]
                 year = str(year_start) if year_start else "Неизвестно"
             data[year] = data.get(year, 0) + 1
-        return dict(sorted(data.items(), key=lambda i: i[0]))
+        return data
 
-    def _stats_tags(self) -> dict:
+    def _compute_tags(self) -> dict:
         rows = self.db.conn.execute("SELECT tags FROM titles").fetchall()
         data = {}
         for row in rows:
@@ -1946,9 +2188,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
             parts = [p.strip() for p in raw.replace(",", ";").split(";") if p.strip()]
             for tag in parts:
                 data[tag] = data.get(tag, 0) + 1
-        return dict(sorted(data.items(), key=lambda i: i[1], reverse=True))
+        return data
 
-    def _stats_statuses(self) -> dict:
+    def _compute_statuses(self) -> dict:
         rows = self.db.conn.execute("SELECT status_json FROM titles").fetchall()
         data = {}
         for row in rows:
@@ -1959,7 +2201,47 @@ class HSorterWindow(Gtk.ApplicationWindow):
             for key, enabled in status.items():
                 if enabled:
                     data[key] = data.get(key, 0) + 1
-        return dict(sorted(data.items(), key=lambda i: i[1], reverse=True))
+        return data
+
+    def _aggregate_video_stats(self, features: list[dict], metric: str, all_files: bool) -> dict:
+        if all_files:
+            data = {}
+            for item in features:
+                key = item.get(metric, "Неизвестно")
+                data[key] = data.get(key, 0) + 1
+            return dict(sorted(data.items(), key=lambda i: i[1], reverse=True))
+        grouped = {}
+        order = {}
+        for item in features:
+            key = item.get(metric, "Неизвестно")
+            tid = item["title_id"]
+            grouped.setdefault(tid, {})
+            grouped[tid][key] = grouped[tid].get(key, 0) + 1
+            order.setdefault(tid, []).append(key)
+        out = {}
+        for tid, counts in grouped.items():
+            max_count = max(counts.values())
+            candidates = [k for k, v in counts.items() if v == max_count]
+            choice = candidates[0]
+            if metric == "resolution":
+
+                def res_score(value: str):
+                    if "x" in value:
+                        try:
+                            w, h = value.lower().split("x", 1)
+                            return int(w) * int(h)
+                        except ValueError:
+                            return -1
+                    return -1
+
+                choice = max(candidates, key=res_score)
+            else:
+                for key in order[tid]:
+                    if key in candidates:
+                        choice = key
+                        break
+            out[choice] = out.get(choice, 0) + 1
+        return dict(sorted(out.items(), key=lambda i: i[1], reverse=True))
 
     def _video_feature(self, media_path: str) -> dict:
         details = MediaInfo.get_details(media_path)
@@ -1980,51 +2262,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         }
 
     def _stats_video(self, metric: str, all_files: bool) -> dict:
-        rows = self.db.conn.execute(
-            "SELECT id, title_id, path FROM media WHERE media_type='video' ORDER BY title_id, sort_order, id"
-        ).fetchall()
-        if all_files:
-            data = {}
-            for row in rows:
-                f = self._video_feature(row["path"])
-                key = f.get(metric, "Неизвестно")
-                data[key] = data.get(key, 0) + 1
-            return dict(sorted(data.items(), key=lambda i: i[1], reverse=True))
-        grouped = {}
-        order = {}
-        for row in rows:
-            f = self._video_feature(row["path"])
-            key = f.get(metric, "Неизвестно")
-            tid = row["title_id"]
-            grouped.setdefault(tid, {})
-            grouped[tid][key] = grouped[tid].get(key, 0) + 1
-            order.setdefault(tid, []).append(key)
-        out = {}
-        for tid, counts in grouped.items():
-            max_count = max(counts.values())
-            candidates = [k for k, v in counts.items() if v == max_count]
-            choice = candidates[0]
-            if metric == "resolution":
-                def res_score(value: str):
-                    if "x" in value:
-                        try:
-                            w, h = value.lower().split("x", 1)
-                            return int(w) * int(h)
-                        except ValueError:
-                            return -1
-                    return -1
-                choice = max(candidates, key=res_score)
-            else:
-                for key in order[tid]:
-                    if key in candidates:
-                        choice = key
-                        break
-            out[choice] = out.get(choice, 0) + 1
-        return dict(sorted(out.items(), key=lambda i: i[1], reverse=True))
+        return self.db.get_stats_cache("video", metric, all_files)
 
     def _stats_audio(self, metric: str, all_files: bool) -> dict:
-        video_metric = "audio_codec" if metric == "codec" else "audio_track_count"
-        return self._stats_video(video_metric, all_files)
+        return self.db.get_stats_cache("audio", metric, all_files)
 
     def _build_pie_chart(self, data: dict, title: str) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
