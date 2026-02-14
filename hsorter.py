@@ -2020,7 +2020,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def open_maintenance_dialog(self) -> None:
         dialog = Gtk.Dialog(title="Обслуживание", transient_for=self, modal=True)
         dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
-        dialog.set_default_size(520, 240)
+        dialog.set_default_size(560, 260)
         content = dialog.get_content_area()
         content.set_spacing(10)
         content.set_margin_top(10)
@@ -2035,6 +2035,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         recalc_button = Gtk.Button(label="Пересчитать статистику")
         recalc_button.connect("clicked", lambda _b: self.recalculate_statistics())
         content.add(recalc_button)
+        thumbs_button = Gtk.Button(label="Создать недостающие миниатюры")
+        thumbs_button.connect("clicked", lambda _b: self.create_missing_thumbnails())
+        content.add(thumbs_button)
         dialog.show_all()
         dialog.run()
         dialog.destroy()
@@ -2154,6 +2157,98 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if close_button:
                 close_button.set_sensitive(True)
 
+        dialog.run()
+        dialog.destroy()
+
+    def create_missing_thumbnails(self) -> None:
+        rows = self.db.conn.execute(
+            """
+            SELECT id, path, thumbnail_path
+            FROM media
+            WHERE media_type='video'
+            ORDER BY title_id, sort_order, id
+            """
+        ).fetchall()
+        targets = [
+            row
+            for row in rows
+            if row["path"] and os.path.exists(row["path"]) and not (row["thumbnail_path"] and os.path.exists(row["thumbnail_path"]))
+        ]
+
+        dialog = Gtk.Dialog(title="Создание миниатюр", transient_for=self, modal=True)
+        dialog.set_deletable(False)
+        dialog.add_button("Отмена", Gtk.ResponseType.CANCEL)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        close_button = dialog.get_widget_for_response(Gtk.ResponseType.CLOSE)
+        cancel_button = dialog.get_widget_for_response(Gtk.ResponseType.CANCEL)
+        if close_button:
+            close_button.set_sensitive(False)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        status_label = Gtk.Label(label="Подготовка...")
+        status_label.set_xalign(0)
+        progress = Gtk.ProgressBar()
+        progress.set_show_text(True)
+        content.add(status_label)
+        content.add(progress)
+        dialog.show_all()
+
+        cancel_requested = False
+
+        def on_cancel(_button):
+            nonlocal cancel_requested
+            cancel_requested = True
+            if cancel_button:
+                cancel_button.set_sensitive(False)
+            status_label.set_text("Отмена запрошена, завершаем текущий файл...")
+
+        if cancel_button:
+            cancel_button.connect("clicked", on_cancel)
+
+        def process_events() -> None:
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        def set_progress(message: str, done: int, total: int) -> None:
+            status_label.set_text(message)
+            fraction = 1.0 if total == 0 else min(1.0, done / total)
+            progress.set_fraction(fraction)
+            progress.set_text(f"{done}/{total}")
+            process_events()
+
+        created = 0
+        processed = 0
+        total = len(targets)
+        set_progress("Поиск недостающих миниатюр завершён", 0, total)
+
+        for idx, row in enumerate(targets, start=1):
+            if cancel_requested:
+                break
+            set_progress(f"Создание миниатюры: {idx}/{total}", idx - 1, total)
+            thumb_path = self._generate_video_thumbnail_cancelable(row["path"], lambda: cancel_requested)
+            if thumb_path:
+                self.db.update_media_thumbnail(row["id"], thumb_path)
+                created += 1
+            processed = idx
+            set_progress(f"Обработано: {idx}/{total}", idx, total)
+
+        if cancel_requested:
+            status_label.set_text(f"Операция остановлена. Создано миниатюр: {created}.")
+        else:
+            status_label.set_text(f"Готово. Создано миниатюр: {created}.")
+            progress.set_fraction(1.0 if total > 0 else 0.0)
+        progress.set_text(f"{processed}/{total}" if total else "0/0")
+
+        if created:
+            self.refresh_media_lists()
+        if cancel_button:
+            cancel_button.set_sensitive(False)
+        if close_button:
+            close_button.set_sensitive(True)
         dialog.run()
         dialog.destroy()
 
@@ -3388,6 +3483,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
 
     def _generate_video_thumbnail(self, video_path: str, callback) -> None:
+        output_path = self._generate_video_thumbnail_cancelable(video_path)
+        if output_path:
+            callback(output_path)
+
+    def _generate_video_thumbnail_cancelable(self, video_path: str, is_cancelled=None) -> str | None:
         cache_dir = self._cache_dir()
         output_path = os.path.join(
             cache_dir, f"thumb_{abs(hash(video_path)) % 100000}.jpg"
@@ -3410,9 +3510,28 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "1",
             output_path,
         ]
-        subprocess.run(cmd, check=False)
-        if os.path.exists(output_path):
-            callback(output_path)
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return None
+        while process.poll() is None:
+            if is_cancelled and is_cancelled():
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                return None
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+            time.sleep(0.05)
+        if process.returncode == 0 and os.path.exists(output_path):
+            return output_path
+        return None
 
     def _get_video_duration(self, video_path: str) -> float | None:
         """Возвращает длительность видео в секундах через ffprobe."""
