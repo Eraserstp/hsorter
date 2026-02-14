@@ -848,7 +848,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.tag_rules_button.set_size_request(36, 36)
         self.tag_rules_button.set_tooltip_text("Управление правилами тегов")
         self.tag_rules_button.connect("clicked", lambda _b: self.open_tagrules_dialog())
-        self.stats_button = Gtk.Button(label="S")
+        self.stats_button = Gtk.Button(label="📊")
         self.stats_button.set_size_request(36, 36)
         self.stats_button.set_tooltip_text("Статистика")
         self.stats_button.connect("clicked", lambda _b: self.open_statistics_dialog())
@@ -873,18 +873,44 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         self.filter_name = Gtk.Entry()
         self.filter_tags = Gtk.Entry()
-        self.filter_status = Gtk.Entry()
+        self.filter_status_checks = {}
+        self.filter_status_button = Gtk.MenuButton(label="Статусы")
+        filter_status_popover = Gtk.Popover.new(self.filter_status_button)
+        filter_status_popover.set_position(Gtk.PositionType.BOTTOM)
+        filter_status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        filter_status_box.set_margin_top(6)
+        filter_status_box.set_margin_bottom(6)
+        filter_status_box.set_margin_start(6)
+        filter_status_box.set_margin_end(6)
+        filter_status_scroller = Gtk.ScrolledWindow()
+        filter_status_scroller.set_size_request(260, 180)
+        filter_status_scroller.add(filter_status_box)
+        filter_status_popover.add(filter_status_scroller)
+        for status in STATUS_OPTIONS:
+            check = self._build_status_check(status)
+            check.connect("toggled", self._on_filter_status_toggled)
+            self.filter_status_checks[status] = check
+            filter_status_box.pack_start(check, False, False, 0)
+        filter_status_popover.show_all()
+        filter_status_popover.hide()
+        self.filter_status_button.set_popover(filter_status_popover)
         self.filter_sort = Gtk.ComboBoxText()
         self.filter_sort.append("title", "По названию")
         self.filter_sort.append("created_at", "По дате добавления")
         self.filter_sort.set_active_id("title")
         filter_box.pack_start(self._row("Название", self.filter_name), False, False, 0)
         filter_box.pack_start(self._row("Теги", self.filter_tags), False, False, 0)
-        filter_box.pack_start(self._row("Статус", self.filter_status), False, False, 0)
+        filter_box.pack_start(self._row("Статус", self.filter_status_button), False, False, 0)
         filter_box.pack_start(self._row("Сортировка", self.filter_sort), False, False, 0)
         apply_button = Gtk.Button(label="Применить")
         apply_button.connect("clicked", lambda _b: self.refresh_titles())
-        filter_box.pack_start(apply_button, False, False, 0)
+        reset_button = Gtk.Button(label="Сбросить")
+        reset_button.connect("clicked", lambda _b: self.reset_filters())
+        filter_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        filter_buttons.pack_start(apply_button, True, True, 0)
+        filter_buttons.pack_start(reset_button, True, True, 0)
+        filter_box.pack_start(filter_buttons, False, False, 0)
+        self._update_filter_status_button_label()
         self.library_box.pack_start(filter_frame, False, False, 0)
 
         self.title_list = Gtk.ListBox()
@@ -924,10 +950,13 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.cover_event = Gtk.EventBox()
         self.cover_event.add(self.cover_image)
         self.cover_event.connect("button-press-event", self.on_cover_double_click)
+        cover_frame = Gtk.Frame()
+        cover_frame.set_shadow_type(Gtk.ShadowType.IN)
+        cover_frame.add(self.cover_event)
         self.cover_button = Gtk.Button(label="Загрузить изображение")
         self.cover_button.connect("clicked", lambda _b: self.pick_cover())
         cover_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        cover_column.pack_start(self.cover_event, False, False, 0)
+        cover_column.pack_start(cover_frame, False, False, 0)
         cover_column.pack_start(self.cover_button, False, False, 0)
         cover_row.pack_start(cover_column, False, False, 0)
 
@@ -943,9 +972,6 @@ class HSorterWindow(Gtk.ApplicationWindow):
         title_column.pack_start(
             self._row("Дополнительные названия", self.alt_titles), False, False, 0
         )
-        cover_row.pack_start(title_column, True, True, 0)
-
-        self.details_box.pack_start(cover_row, False, False, 0)
 
         # Выпадающий чеклист статусов.
         self.status_checks = {}
@@ -969,7 +995,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         status_popover.show_all()
         status_popover.hide()
         self.status_button.set_popover(status_popover)
-        self.details_box.pack_start(self._row("Статус", self.status_button), False, False, 0)
+        title_column.pack_start(self._row("Статус", self.status_button), False, False, 0)
 
         rating_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.rating_entry = Gtk.Entry()
@@ -983,7 +1009,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self._row("Личный рейтинг", self.personal_rating_entry), True, True, 0
         )
         rating_row.pack_start(self.censored_check, False, False, 0)
-        self.details_box.pack_start(rating_row, False, False, 0)
+        title_column.pack_start(rating_row, False, False, 0)
 
         year_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         current_year = datetime.date.today().year
@@ -1001,7 +1027,19 @@ class HSorterWindow(Gtk.ApplicationWindow):
         year_row.pack_start(self._row("Год окончания", self.year_end), True, True, 0)
         year_row.pack_start(self._row("Эпизоды", self.episodes_spin), True, True, 0)
         year_row.pack_start(self._row("Длительность", self.duration_entry), True, True, 0)
-        self.details_box.pack_start(year_row, False, False, 0)
+        title_column.pack_start(year_row, False, False, 0)
+
+        date_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.created_at_label = Gtk.Label(label="")
+        self.created_at_label.set_xalign(0)
+        self.updated_at_label = Gtk.Label(label="")
+        self.updated_at_label.set_xalign(0)
+        date_row.pack_start(self._row("Дата добавления", self.created_at_label), True, True, 0)
+        date_row.pack_start(self._row("Дата изменения", self.updated_at_label), True, True, 0)
+        title_column.pack_start(date_row, False, False, 0)
+
+        cover_row.pack_start(title_column, True, True, 0)
+        self.details_box.pack_start(cover_row, False, False, 0)
 
         url_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         self.url_entry = Gtk.Entry()
@@ -1016,15 +1054,6 @@ class HSorterWindow(Gtk.ApplicationWindow):
         url_row.pack_start(self.sync_anidb_button, False, False, 0)
         self.details_box.pack_start(url_row, False, False, 0)
 
-        date_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.created_at_label = Gtk.Label(label="")
-        self.created_at_label.set_xalign(0)
-        self.updated_at_label = Gtk.Label(label="")
-        self.updated_at_label.set_xalign(0)
-        date_row.pack_start(self._row("Дата добавления", self.created_at_label), True, True, 0)
-        date_row.pack_start(self._row("Дата изменения", self.updated_at_label), True, True, 0)
-        self.details_box.pack_start(date_row, False, False, 0)
-
         self.description_buffer = Gtk.TextBuffer()
         description_view = Gtk.TextView(buffer=self.description_buffer)
         description_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
@@ -1032,8 +1061,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
         description_scroller = Gtk.ScrolledWindow()
         description_scroller.set_vexpand(True)
         description_scroller.add(description_view)
+        description_frame = Gtk.Frame()
+        description_frame.set_shadow_type(Gtk.ShadowType.IN)
+        description_frame.add(description_scroller)
         self.details_box.pack_start(
-            self._section("Краткое описание", description_scroller), True, True, 0
+            self._section("Краткое описание", description_frame), True, True, 0
         )
 
         info_frame = Gtk.Frame(label="Сведения")
@@ -1070,22 +1102,34 @@ class HSorterWindow(Gtk.ApplicationWindow):
         comment_scroller.set_size_request(240, 160)
         comment_scroller.set_vexpand(True)
         comment_scroller.add(comment_view)
+        comment_frame = Gtk.Frame()
+        comment_frame.set_shadow_type(Gtk.ShadowType.IN)
+        comment_frame.add(comment_scroller)
         comment_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         comment_label = Gtk.Label(label="Комментарий")
         comment_label.set_xalign(0)
         comment_box.pack_start(comment_label, False, False, 0)
-        comment_box.pack_start(comment_scroller, True, True, 0)
+        comment_box.pack_start(comment_frame, True, True, 0)
         info_box.pack_start(comment_box, True, True, 0)
         self.details_box.pack_start(info_frame, False, False, 0)
 
-        tags_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self.tags_entry = Gtk.Entry()
-        self.tags_entry.connect("changed", lambda _e: self._mark_dirty())
+        tags_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.tags_buffer = Gtk.TextBuffer()
+        self.tags_buffer.connect("changed", lambda _b: self._mark_dirty())
+        tags_view = Gtk.TextView(buffer=self.tags_buffer)
+        tags_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        tags_scroller = Gtk.ScrolledWindow()
+        tags_scroller.set_size_request(-1, 96)
+        tags_scroller.set_vexpand(False)
+        tags_scroller.add(tags_view)
+        tags_frame = Gtk.Frame()
+        tags_frame.set_shadow_type(Gtk.ShadowType.IN)
+        tags_frame.add(tags_scroller)
+        tags_box.pack_start(tags_frame, True, True, 0)
         add_tag = Gtk.Button(label="Добавить тег")
         add_tag.connect("clicked", lambda _b: self.add_tag())
-        tags_row.pack_start(self.tags_entry, True, True, 0)
-        tags_row.pack_start(add_tag, False, False, 0)
-        self.details_box.pack_start(self._section("Теги", tags_row), False, False, 0)
+        tags_box.pack_start(add_tag, False, False, 0)
+        self.details_box.pack_start(self._section("Теги", tags_box), False, False, 0)
 
         self.save_button = Gtk.Button(label="Сохранить изменения")
         self.save_button.connect("clicked", lambda _b: self.save_title())
@@ -1177,16 +1221,58 @@ class HSorterWindow(Gtk.ApplicationWindow):
         widget.drag_dest_set(Gtk.DestDefaults.ALL, [target], Gdk.DragAction.COPY)
         widget.connect("drag-data-received", handler)
 
+    def _get_tags_text(self) -> str:
+        return self.tags_buffer.get_text(
+            self.tags_buffer.get_start_iter(),
+            self.tags_buffer.get_end_iter(),
+            True,
+        )
+
+    def _set_tags_text(self, value: str) -> None:
+        self.tags_buffer.set_text(value or "")
+
+    def _get_selected_filter_statuses(self) -> list[str]:
+        return [status for status, check in self.filter_status_checks.items() if check.get_active()]
+
+    def _update_filter_status_button_label(self) -> None:
+        selected = self._get_selected_filter_statuses()
+        if not selected:
+            self.filter_status_button.set_label("Статусы")
+            return
+        self.filter_status_button.set_label(f"Статусы ({len(selected)})")
+
+    def _on_filter_status_toggled(self, _button: Gtk.CheckButton) -> None:
+        self._update_filter_status_button_label()
+
+    def reset_filters(self) -> None:
+        self.filter_name.set_text("")
+        self.filter_tags.set_text("")
+        for check in self.filter_status_checks.values():
+            check.set_active(False)
+        self.filter_sort.set_active_id("title")
+        self._update_filter_status_button_label()
+        self.refresh_titles()
+
     # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
         for row in self.title_list.get_children():
             self.title_list.remove(row)
+        selected_statuses = self._get_selected_filter_statuses()
         titles = self.db.list_titles(
             query=self.filter_name.get_text().strip(),
             tags=self.filter_tags.get_text().strip(),
-            status_filter=self.filter_status.get_text().strip(),
             sort_by=self.filter_sort.get_active_id() or "title",
         )
+        if selected_statuses:
+            filtered_titles = []
+            for title in titles:
+                try:
+                    status_data = json.loads(title["status_json"] or "{}")
+                except json.JSONDecodeError:
+                    status_data = {}
+                if any(bool(status_data.get(status)) for status in selected_statuses):
+                    filtered_titles.append(title)
+            titles = filtered_titles
         self.title_rows = []
         for title in titles:
             display = html.escape(self._truncate_title(title["main_title"]))
@@ -1266,7 +1352,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         for key, entry in self.info_entries.items():
             entry.set_text(info_map.get(key, ""))
         self.title_comment_buffer.set_text(title["title_comment"] or "")
-        self.tags_entry.set_text(title["tags"])
+        self._set_tags_text(title["tags"])
         status_data = json.loads(title["status_json"] or "{}")
         for status, check in self.status_checks.items():
             check.set_active(bool(status_data.get(status)))
@@ -1425,7 +1511,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             ).strip(),
             "url": self.url_entry.get_text().strip(),
             "status": status_data,
-            "tags": self.tags_entry.get_text().strip(),
+            "tags": self._get_tags_text().strip(),
             "cover_path": self.cover_path,
             "created_at": self.created_at_value,
             "updated_at": self.updated_at_value,
@@ -1455,7 +1541,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.updated_at_value = ""
         for check in self.status_checks.values():
             check.set_active(False)
-        self.tags_entry.set_text("")
+        self._set_tags_text("")
         self.cover_path = ""
         self.cover_image.clear()
         self.images_store.clear()
@@ -1481,12 +1567,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
             return
 
         # 1. Собираем все текущие теги из поля
-        current = self.tags_entry.get_text().strip()
+        current = self._get_tags_text().strip()
         tags = self._normalize_tag_tokens(current)
         tags.append(new_tag)
         processed_tags = self._apply_tag_rules(tags)
         unique_tags = sorted(set(processed_tags))
-        self.tags_entry.set_text("; ".join(unique_tags))
+        self._set_tags_text("; ".join(unique_tags))
 
         self._mark_dirty()
 
@@ -2209,6 +2295,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 updated += 1
             set_progress(f"Валидация тегов: {idx}/{total}", idx)
         self.db.conn.commit()
+        self.db.replace_stats_cache("tags", "all", True, self._compute_tags())
+        self.db.set_setting("stats_cache_updated_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
         status_label.set_text(f"Готово. Обновлено тайтлов: {updated}.")
         progress.set_fraction(1.0 if total else 0.0)
@@ -2312,14 +2400,30 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
 
     def _stats_titles_by_year(self) -> dict:
-        data = self.db.get_stats_cache("titles", "by_year", True)
+        data = self._stats_with_fallback("titles", "by_year", True, self._compute_titles_by_year)
         return dict(sorted(data.items(), key=lambda i: i[0]))
 
     def _stats_tags(self) -> dict:
-        return self.db.get_stats_cache("tags", "all", True)
+        return self._stats_with_fallback("tags", "all", True, self._compute_tags)
 
     def _stats_statuses(self) -> dict:
-        return self.db.get_stats_cache("statuses", "all", True)
+        return self._stats_with_fallback("statuses", "all", True, self._compute_statuses)
+
+    def _stats_with_fallback(
+        self,
+        category: str,
+        metric: str,
+        all_files: bool,
+        compute_fn,
+    ) -> dict:
+        data = self.db.get_stats_cache(category, metric, all_files)
+        if data:
+            return data
+        computed = compute_fn()
+        if computed:
+            self.db.replace_stats_cache(category, metric, all_files, computed)
+            self.db.set_setting("stats_cache_updated_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+        return computed
 
     def _compute_titles_by_year(self) -> dict:
         rows = self.db.conn.execute("SELECT created_at, year_start FROM titles").fetchall()
@@ -2961,7 +3065,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 self.title_comment_buffer.get_end_iter(),
                 True,
             ).strip(),
-            "tags": self.tags_entry.get_text().strip(),
+            "tags": self._get_tags_text().strip(),
             "url": self.url_entry.get_text().strip(),
             "cover_path": self.cover_path or "",
         }
@@ -2990,7 +3094,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         )
         self.info_entries["Автор сценария/оригинала"].set_text(data.get("author", ""))
         self.info_entries["Композитор"].set_text(data.get("composer", ""))
-        self.tags_entry.set_text(data.get("tags", ""))
+        self._set_tags_text(data.get("tags", ""))
         cover_path = data.get("cover_path", "")
         if cover_path:
             self.cover_path = cover_path
