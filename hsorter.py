@@ -71,7 +71,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 main_title TEXT NOT NULL,
                 alt_titles TEXT DEFAULT "",
-                rating INTEGER,
+                rating REAL,
                 personal_rating INTEGER,
                 censored INTEGER DEFAULT 0,
                 year_start INTEGER,
@@ -181,6 +181,7 @@ class Database:
             cur.execute("ALTER TABLE titles ADD COLUMN created_at TEXT DEFAULT ''")
         if not self._column_exists("titles", "updated_at"):
             cur.execute("ALTER TABLE titles ADD COLUMN updated_at TEXT DEFAULT ''")
+        self._migrate_titles_rating_to_real()
         self.conn.commit()
 
     # Проверяем наличие колонки в таблице.
@@ -188,6 +189,80 @@ class Database:
         cur = self.conn.cursor()
         columns = cur.execute(f"PRAGMA table_info({table})").fetchall()
         return any(col["name"] == column for col in columns)
+
+    def _migrate_titles_rating_to_real(self) -> None:
+        cur = self.conn.cursor()
+        columns = cur.execute("PRAGMA table_info(titles)").fetchall()
+        rating_column = next((col for col in columns if col["name"] == "rating"), None)
+        if not rating_column:
+            return
+        column_type = str(rating_column["type"] or "").upper()
+        if "REAL" in column_type:
+            return
+
+        cur.execute("PRAGMA foreign_keys=OFF")
+        try:
+            cur.execute("ALTER TABLE titles RENAME TO titles_old")
+            cur.execute(
+                """
+                CREATE TABLE titles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    main_title TEXT NOT NULL,
+                    alt_titles TEXT DEFAULT "",
+                    rating REAL,
+                    personal_rating INTEGER,
+                    censored INTEGER DEFAULT 0,
+                    year_start INTEGER,
+                    year_end INTEGER,
+                    episodes INTEGER DEFAULT 0,
+                    total_duration TEXT DEFAULT "",
+                    description TEXT DEFAULT "",
+                    country TEXT DEFAULT "",
+                    production TEXT DEFAULT "",
+                    director TEXT DEFAULT "",
+                    character_designer TEXT DEFAULT "",
+                    author TEXT DEFAULT "",
+                    composer TEXT DEFAULT "",
+                    subtitles_author TEXT DEFAULT "",
+                    voice_author TEXT DEFAULT "",
+                    title_comment TEXT DEFAULT "",
+                    url TEXT DEFAULT "",
+                    created_at TEXT DEFAULT "",
+                    updated_at TEXT DEFAULT "",
+                    status_json TEXT DEFAULT "{}",
+                    tags TEXT DEFAULT "",
+                    cover_path TEXT DEFAULT ""
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO titles (
+                    id, main_title, alt_titles, rating, personal_rating, censored,
+                    year_start, year_end, episodes, total_duration, description,
+                    country, production, director, character_designer, author,
+                    composer, subtitles_author, voice_author, title_comment, url,
+                    created_at, updated_at, status_json, tags, cover_path
+                )
+                SELECT
+                    id, main_title, alt_titles,
+                    CASE
+                        WHEN rating IS NULL OR TRIM(CAST(rating AS TEXT)) = '' THEN NULL
+                        ELSE CAST(rating AS REAL)
+                    END,
+                    personal_rating, censored,
+                    year_start, year_end, episodes, total_duration, description,
+                    country, production, director, character_designer, author,
+                    composer, subtitles_author, voice_author, title_comment, url,
+                    created_at, updated_at, status_json, tags, cover_path
+                FROM titles_old
+                """
+            )
+            cur.execute("DROP TABLE titles_old")
+        except Exception:
+            raise
+        finally:
+            cur.execute("PRAGMA foreign_keys=ON")
 
     # Получение списка тайтлов с фильтрами по названию, тегам и статусам.
     def list_titles(
@@ -1404,7 +1479,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.update_title_cover(title_id, cached_cover)
         self.main_title.set_text(title["main_title"])
         self.alt_titles.set_text(title["alt_titles"])
-        self.rating_entry.set_text("" if title["rating"] is None else str(title["rating"]))
+        self.rating_entry.set_text(
+            "" if title["rating"] is None else f"{float(title['rating']):.2f}"
+        )
         self.personal_rating_entry.set_text(
             "" if title["personal_rating"] is None else str(title["personal_rating"])
         )
@@ -1563,7 +1640,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         return {
             "main_title": self.main_title.get_text().strip(),
             "alt_titles": self.alt_titles.get_text().strip(),
-            "rating": self._parse_optional_int(self.rating_entry.get_text().strip()),
+            "rating": self._parse_optional_float(self.rating_entry.get_text().strip()),
             "personal_rating": self._parse_optional_int(
                 self.personal_rating_entry.get_text().strip()
             ),
@@ -1959,6 +2036,15 @@ class HSorterWindow(Gtk.ApplicationWindow):
             return None
         try:
             return int(value)
+        except ValueError:
+            return None
+
+    def _parse_optional_float(self, value: str) -> float | None:
+        if not value:
+            return None
+        normalized = value.replace(",", ".")
+        try:
+            return float(normalized)
         except ValueError:
             return None
 
