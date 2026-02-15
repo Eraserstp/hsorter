@@ -3392,6 +3392,401 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.run()
         dialog.destroy()
 
+    def export_to_emby(self) -> None:
+        settings = self._get_emby_settings()
+        ready, message = self._check_emby_connection(settings)
+        if not ready:
+            self._message("Emby", message)
+            return
+
+        base_url = self._emby_base_url(settings["server"])
+        params = {"api_key": settings["api_key"]}
+        if settings.get("server_id"):
+            params["serverId"] = settings["server_id"]
+
+        dialog = Gtk.Dialog(title="Экспорт в Emby", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        close_button = dialog.get_widget_for_response(Gtk.ResponseType.CLOSE)
+        if close_button:
+            close_button.set_sensitive(False)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        status_label = Gtk.Label(label="Подготовка...")
+        status_label.set_xalign(0)
+        progress = Gtk.ProgressBar()
+        progress.set_show_text(True)
+        content.add(status_label)
+        content.add(progress)
+        dialog.show_all()
+
+        def pump() -> None:
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        try:
+            items_params = params.copy()
+            items_params.update(
+                {
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Series",
+                    "Fields": "OriginalTitle,Path,ProviderIds,Tags",
+                    "Limit": "10000",
+                }
+            )
+            if settings.get("parent_id"):
+                items_params["ParentId"] = settings["parent_id"]
+            user_id = settings.get("user_id", "").strip()
+            if user_id:
+                items_url = f"{base_url}/Users/{user_id}/Items"
+            else:
+                items_url = f"{base_url}/Items"
+            emby_resp = requests.get(items_url, params=items_params, timeout=30)
+            emby_resp.raise_for_status()
+            emby_items = emby_resp.json().get("Items", [])
+
+            by_name = {}
+            by_dir = {}
+            for item in emby_items:
+                for value in [item.get("Name", ""), item.get("OriginalTitle", "")]:
+                    key = value.strip().lower()
+                    if key and key not in by_name:
+                        by_name[key] = item
+                path_value = (item.get("Path") or "").replace("\\", "/").rstrip("/")
+                if path_value:
+                    folder = path_value.split("/")[-1].strip().lower()
+                    if folder and folder not in by_dir:
+                        by_dir[folder] = item
+
+            title_rows = self.db.conn.execute(
+                "SELECT id, main_title, alt_titles, tags, url FROM titles ORDER BY id"
+            ).fetchall()
+            total = len(title_rows)
+            exported = 0
+            matched = 0
+
+            for idx, row in enumerate(title_rows, start=1):
+                names = [row["main_title"] or ""]
+                names.extend(
+                    [part.strip() for part in (row["alt_titles"] or "").split(";") if part.strip()]
+                )
+                title_dirs = []
+                media_rows = self.db.conn.execute(
+                    "SELECT path FROM media WHERE title_id=? AND media_type='video'",
+                    (row["id"],),
+                ).fetchall()
+                for media in media_rows:
+                    media_path = (media["path"] or "").replace("\\", "/").rstrip("/")
+                    if not media_path:
+                        continue
+                    parts = media_path.split("/")
+                    if len(parts) > 1:
+                        title_dirs.append(parts[-2].strip().lower())
+
+                emby_item = None
+                for name in names:
+                    key = name.lower().strip()
+                    if key in by_name:
+                        emby_item = by_name[key]
+                        break
+                if not emby_item:
+                    for folder in title_dirs:
+                        if folder in by_dir:
+                            emby_item = by_dir[folder]
+                            break
+
+                if emby_item:
+                    matched += 1
+                    item_id = emby_item.get("Id")
+                    if item_id:
+                        item_url = f"{base_url}/Users/{user_id}/Items/{item_id}" if user_id else f"{base_url}/Items/{item_id}"
+                        item_resp = requests.get(item_url, params=params, timeout=30)
+                        item_resp.raise_for_status()
+                        payload = item_resp.json()
+
+                        tags = [{"Name": tag} for tag in self._normalize_tag_tokens(row["tags"] or "")]
+                        payload["TagItems"] = tags
+
+                        providers = payload.get("ProviderIds") or {}
+                        anime_id = self._extract_anidb_id((row["url"] or "").strip())
+                        if anime_id:
+                            providers["AniDB"] = anime_id
+                            payload["ProviderIds"] = providers
+
+                        update_url = f"{base_url}/emby/Items/{item_id}"
+                        requests.post(
+                            update_url,
+                            params=params,
+                            data=json.dumps(payload),
+                            headers={"Content-Type": "application/json"},
+                            timeout=30,
+                        ).raise_for_status()
+                        exported += 1
+
+                status_label.set_text(
+                    f"Экспорт в Emby: {idx}/{total}. Сопоставлено: {matched}, экспортировано: {exported}."
+                )
+                progress.set_fraction(1.0 if total == 0 else idx / total)
+                progress.set_text(f"{idx}/{total}")
+                pump()
+
+            status_label.set_text(
+                f"Готово. Экспортировано: {exported} из {total}. Сопоставлено: {matched}."
+            )
+            progress.set_fraction(1.0 if total else 0.0)
+            progress.set_text(f"{total}/{total}" if total else "0/0")
+        except Exception as exc:
+            status_label.set_text(f"Ошибка экспорта: {exc}")
+            progress.set_text("Ошибка")
+        finally:
+            if close_button:
+                close_button.set_sensitive(True)
+
+        dialog.run()
+        dialog.destroy()
+
+    def _app_dir(self) -> str:
+        return os.path.dirname(__file__)
+
+    def _backups_dir(self) -> str:
+        path = os.path.join(self._app_dir(), ".backups")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _cache_dir_path(self) -> str:
+        return os.path.join(self._app_dir(), ".hsorter_cache")
+
+    def _seven_zip_command(self) -> str | None:
+        for candidate in ("7z", "7zz"):
+            if shutil.which(candidate):
+                return candidate
+        return None
+
+    def _format_file_size(self, size_bytes: int) -> str:
+        units = ["Б", "КБ", "МБ", "ГБ", "ТБ"]
+        value = float(max(size_bytes, 0))
+        unit_index = 0
+        while value >= 1024 and unit_index < len(units) - 1:
+            value /= 1024
+            unit_index += 1
+        return f"{value:.1f} {units[unit_index]}"
+
+    def _parse_backup_datetime(self, filename: str) -> datetime.datetime | None:
+        match = re.match(r"^hsorter_backup_(\d{8})_(\d{4})\.7z$", filename)
+        if not match:
+            return None
+        try:
+            return datetime.datetime.strptime(
+                f"{match.group(1)}{match.group(2)}", "%Y%m%d%H%M"
+            )
+        except ValueError:
+            return None
+
+    def _list_backups(self) -> list[dict]:
+        backups = []
+        for entry in os.scandir(self._backups_dir()):
+            if not entry.is_file() or not entry.name.endswith(".7z"):
+                continue
+            created_dt = self._parse_backup_datetime(entry.name)
+            if not created_dt:
+                continue
+            stat_info = entry.stat()
+            backups.append(
+                {
+                    "path": entry.path,
+                    "filename": entry.name,
+                    "created_dt": created_dt,
+                    "size": stat_info.st_size,
+                }
+            )
+        return sorted(backups, key=lambda item: item["created_dt"], reverse=True)
+
+    def _create_backup_archive(self) -> str:
+        seven_zip = self._seven_zip_command()
+        if not seven_zip:
+            raise RuntimeError("Утилита 7z не найдена в системе.")
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        archive_name = f"hsorter_backup_{timestamp}.7z"
+        archive_path = os.path.join(self._backups_dir(), archive_name)
+        db_filename = os.path.basename(self.db.path)
+        cache_name = os.path.basename(self._cache_dir_path())
+
+        cmd = [
+            seven_zip,
+            "a",
+            "-t7z",
+            "-mx=9",
+            archive_path,
+            db_filename,
+            cache_name,
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=self._app_dir(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "Ошибка 7z").strip())
+        return archive_path
+
+    def _restore_backup_archive(self, archive_path: str) -> None:
+        seven_zip = self._seven_zip_command()
+        if not seven_zip:
+            raise RuntimeError("Утилита 7z не найдена в системе.")
+
+        db_path = self.db.path
+        cache_dir = self._cache_dir_path()
+        app_dir = self._app_dir()
+
+        self.db.conn.close()
+        self.current_title_id = None
+
+        if os.path.exists(db_path):
+            os.remove(db_path)
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir)
+
+        cmd = [seven_zip, "x", "-y", f"-o{app_dir}", archive_path]
+        result = subprocess.run(
+            cmd,
+            cwd=app_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.db = Database(db_path)
+            raise RuntimeError((result.stderr or result.stdout or "Ошибка восстановления 7z").strip())
+
+        self.db = Database(db_path)
+        self.refresh_titles()
+        self.clear_form()
+
+    def open_backup_dialog(self) -> None:
+        dialog = Gtk.Dialog(title="Резервное копирование", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        dialog.set_default_size(680, 420)
+
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+
+        create_button = Gtk.Button(label="Создать резервную копию")
+        restore_button = Gtk.Button(label="Восстановить")
+        restore_button.set_sensitive(False)
+
+        status_label = Gtk.Label(label="")
+        status_label.set_xalign(0)
+
+        store = Gtk.ListStore(str, str, str)
+        tree = Gtk.TreeView(model=store)
+        renderer = Gtk.CellRendererText()
+        tree.append_column(Gtk.TreeViewColumn("Дата и время", renderer, text=0))
+        tree.append_column(Gtk.TreeViewColumn("Размер", renderer, text=1))
+        tree.set_headers_visible(True)
+
+        selection = tree.get_selection()
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.add(tree)
+
+        buttons_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        buttons_row.pack_start(create_button, False, False, 0)
+        buttons_row.pack_start(restore_button, False, False, 0)
+
+        content.pack_start(buttons_row, False, False, 0)
+        content.pack_start(scroller, True, True, 0)
+        content.pack_start(status_label, False, False, 0)
+
+        def refresh_backup_list() -> None:
+            store.clear()
+            for backup in self._list_backups():
+                store.append(
+                    [
+                        backup["created_dt"].strftime("%Y-%m-%d %H:%M"),
+                        self._format_file_size(backup["size"]),
+                        backup["path"],
+                    ]
+                )
+            restore_button.set_sensitive(False)
+
+        def get_selected_path() -> str:
+            model, tree_iter = selection.get_selected()
+            if not tree_iter:
+                return ""
+            return model.get_value(tree_iter, 2)
+
+        def set_status(text: str) -> None:
+            status_label.set_text(text)
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        def on_selection_changed(_selection) -> None:
+            restore_button.set_sensitive(bool(get_selected_path()))
+
+        def on_create_clicked(_button) -> None:
+            try:
+                set_status("Создание резервной копии...")
+                path = self._create_backup_archive()
+                refresh_backup_list()
+                set_status(f"Резервная копия создана: {os.path.basename(path)}")
+            except Exception as exc:
+                set_status(f"Ошибка создания резервной копии: {exc}")
+
+        def on_restore_clicked(_button) -> None:
+            selected_path = get_selected_path()
+            if not selected_path:
+                return
+
+            create_now = self._confirm(
+                "Резервное копирование",
+                "Перед восстановлением рекомендуется создать резервную копию текущих данных. Создать сейчас?",
+            )
+            if create_now:
+                try:
+                    set_status("Создание текущей резервной копии...")
+                    self._create_backup_archive()
+                    refresh_backup_list()
+                except Exception as exc:
+                    set_status(f"Не удалось создать резервную копию перед восстановлением: {exc}")
+                    if not self._confirm(
+                        "Продолжить без копии",
+                        "Продолжить восстановление без резервной копии текущих данных?",
+                    ):
+                        return
+
+            if not self._confirm(
+                "Восстановление",
+                "Текущие данные будут заменены данными из выбранной резервной копии. Продолжить?",
+            ):
+                return
+
+            try:
+                set_status("Восстановление данных...")
+                self._restore_backup_archive(selected_path)
+                set_status("Восстановление завершено.")
+            except Exception as exc:
+                set_status(f"Ошибка восстановления: {exc}")
+
+        selection.connect("changed", on_selection_changed)
+        create_button.connect("clicked", on_create_clicked)
+        restore_button.connect("clicked", on_restore_clicked)
+
+        refresh_backup_list()
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
     def open_tagrules_dialog(self):
         dialog = Gtk.Dialog(
             title="Правила замены тегов",
