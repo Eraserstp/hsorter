@@ -34,6 +34,8 @@ STATUS_OPTIONS = [
     "хардсаб",
     "проблемы перевода",
     "отсутствует перевод",
+    "отсутствуют теги",
+    "неполные теги",
     "частично отсутствует",
     "водяной знак",
     "проблема озвучки",
@@ -1410,6 +1412,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.refresh_titles()
         return False
 
+    def _cancel_scheduled_filter_refresh(self) -> None:
+        if self._filter_refresh_timeout_id is None:
+            return
+        GLib.source_remove(self._filter_refresh_timeout_id)
+        self._filter_refresh_timeout_id = None
+
+    def _schedule_refresh_titles(self) -> None:
+        self._cancel_scheduled_filter_refresh()
+        self._filter_refresh_timeout_id = GLib.timeout_add(500, self._run_scheduled_refresh_titles)
+
+    def _run_scheduled_refresh_titles(self) -> bool:
+        self._filter_refresh_timeout_id = None
+        self.refresh_titles()
+        return False
+
     # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
         for row in self.title_list.get_children():
@@ -1638,6 +1655,8 @@ class HSorterWindow(Gtk.ApplicationWindow):
     # Считать значения формы в словарь для сохранения.
     def collect_form_data(self) -> dict:
         status_data = {status: check.get_active() for status, check in self.status_checks.items()}
+        tags_value = "; ".join(self._normalize_tag_tokens(self._get_tags_text()))
+        status_data["отсутствуют теги"] = tags_value == ""
         return {
             "main_title": self.main_title.get_text().strip(),
             "alt_titles": self.alt_titles.get_text().strip(),
@@ -1670,7 +1689,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             ).strip(),
             "url": self.url_entry.get_text().strip(),
             "status": status_data,
-            "tags": "; ".join(self._normalize_tag_tokens(self._get_tags_text())),
+            "tags": tags_value,
             "cover_path": self.cover_path,
             "created_at": self.created_at_value,
             "updated_at": self.updated_at_value,
@@ -2465,7 +2484,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
 
     def validate_tags(self) -> None:
-        rows = self.db.conn.execute("SELECT id, tags FROM titles ORDER BY id").fetchall()
+        rows = self.db.conn.execute("SELECT id, tags, status_json FROM titles ORDER BY id").fetchall()
 
         dialog = Gtk.Dialog(title="Валидация тегов", transient_for=self, modal=True)
         dialog.set_deletable(False)
@@ -2503,17 +2522,40 @@ class HSorterWindow(Gtk.ApplicationWindow):
             tags = self._normalize_tag_tokens(raw)
             tags = self._apply_tag_rules(tags)
             tags = [tag.strip().lower() for tag in tags if tag and tag.strip()]
+            has_tagme = "tagme" in tags
+            tags = [tag for tag in tags if tag != "tagme"]
             validated = "; ".join(sorted(set(tags)))
-            if validated != raw.strip():
-                self.db.conn.execute("UPDATE titles SET tags=?, updated_at=? WHERE id=?", (
-                    validated,
-                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    row["id"],
-                ))
+
+            try:
+                status_data = json.loads(row["status_json"] or "{}")
+            except json.JSONDecodeError:
+                status_data = {}
+            status_changed = False
+
+            missing_tags_status = validated == ""
+            if bool(status_data.get("отсутствуют теги")) != missing_tags_status:
+                status_data["отсутствуют теги"] = missing_tags_status
+                status_changed = True
+
+            if has_tagme and not bool(status_data.get("неполные теги")):
+                status_data["неполные теги"] = True
+                status_changed = True
+
+            if validated != raw.strip() or status_changed:
+                self.db.conn.execute(
+                    "UPDATE titles SET tags=?, status_json=?, updated_at=? WHERE id=?",
+                    (
+                        validated,
+                        json.dumps(status_data, ensure_ascii=False),
+                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        row["id"],
+                    ),
+                )
                 updated += 1
             set_progress(f"Валидация тегов: {idx}/{total}", idx)
         self.db.conn.commit()
         self.db.replace_stats_cache("tags", "all", True, self._compute_tags())
+        self.db.replace_stats_cache("statuses", "all", True, self._compute_statuses())
         self.db.set_setting("stats_cache_updated_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
         status_label.set_text(f"Готово. Обновлено тайтлов: {updated}.")
