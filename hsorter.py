@@ -1427,6 +1427,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.refresh_titles()
         return False
 
+    def _cancel_scheduled_filter_refresh(self) -> None:
+        if self._filter_refresh_timeout_id is None:
+            return
+        GLib.source_remove(self._filter_refresh_timeout_id)
+        self._filter_refresh_timeout_id = None
+
+    def _schedule_refresh_titles(self) -> None:
+        self._cancel_scheduled_filter_refresh()
+        self._filter_refresh_timeout_id = GLib.timeout_add(500, self._run_scheduled_refresh_titles)
+
+    def _run_scheduled_refresh_titles(self) -> bool:
+        self._filter_refresh_timeout_id = None
+        self.refresh_titles()
+        return False
+
     # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
         for row in self.title_list.get_children():
@@ -2361,6 +2376,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         export_emby_button = Gtk.Button(label="Экспорт данных в Emby")
         export_emby_button.connect("clicked", lambda _b: self.export_to_emby())
         content.add(export_emby_button)
+        backup_button = Gtk.Button(label="Резервное копирование")
+        backup_button.connect("clicked", lambda _b: self.open_backup_dialog())
+        content.add(backup_button)
         dialog.show_all()
         dialog.run()
         dialog.destroy()
@@ -3136,6 +3154,245 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if close_button:
                 close_button.set_sensitive(True)
 
+        dialog.run()
+        dialog.destroy()
+
+    def _app_dir(self) -> str:
+        return os.path.dirname(__file__)
+
+    def _backups_dir(self) -> str:
+        path = os.path.join(self._app_dir(), ".backups")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _cache_dir_path(self) -> str:
+        return os.path.join(self._app_dir(), ".hsorter_cache")
+
+    def _seven_zip_command(self) -> str | None:
+        for candidate in ("7z", "7zz"):
+            if shutil.which(candidate):
+                return candidate
+        return None
+
+    def _format_file_size(self, size_bytes: int) -> str:
+        units = ["Б", "КБ", "МБ", "ГБ", "ТБ"]
+        value = float(max(size_bytes, 0))
+        unit_index = 0
+        while value >= 1024 and unit_index < len(units) - 1:
+            value /= 1024
+            unit_index += 1
+        return f"{value:.1f} {units[unit_index]}"
+
+    def _parse_backup_datetime(self, filename: str) -> datetime.datetime | None:
+        match = re.match(r"^hsorter_backup_(\d{8})_(\d{4})\.7z$", filename)
+        if not match:
+            return None
+        try:
+            return datetime.datetime.strptime(
+                f"{match.group(1)}{match.group(2)}", "%Y%m%d%H%M"
+            )
+        except ValueError:
+            return None
+
+    def _list_backups(self) -> list[dict]:
+        backups = []
+        for entry in os.scandir(self._backups_dir()):
+            if not entry.is_file() or not entry.name.endswith(".7z"):
+                continue
+            created_dt = self._parse_backup_datetime(entry.name)
+            if not created_dt:
+                continue
+            stat_info = entry.stat()
+            backups.append(
+                {
+                    "path": entry.path,
+                    "filename": entry.name,
+                    "created_dt": created_dt,
+                    "size": stat_info.st_size,
+                }
+            )
+        return sorted(backups, key=lambda item: item["created_dt"], reverse=True)
+
+    def _create_backup_archive(self) -> str:
+        seven_zip = self._seven_zip_command()
+        if not seven_zip:
+            raise RuntimeError("Утилита 7z не найдена в системе.")
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        archive_name = f"hsorter_backup_{timestamp}.7z"
+        archive_path = os.path.join(self._backups_dir(), archive_name)
+        db_filename = os.path.basename(self.db.path)
+        cache_name = os.path.basename(self._cache_dir_path())
+
+        cmd = [
+            seven_zip,
+            "a",
+            "-t7z",
+            "-mx=9",
+            archive_path,
+            db_filename,
+            cache_name,
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=self._app_dir(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "Ошибка 7z").strip())
+        return archive_path
+
+    def _restore_backup_archive(self, archive_path: str) -> None:
+        seven_zip = self._seven_zip_command()
+        if not seven_zip:
+            raise RuntimeError("Утилита 7z не найдена в системе.")
+
+        db_path = self.db.path
+        cache_dir = self._cache_dir_path()
+        app_dir = self._app_dir()
+
+        self.db.conn.close()
+        self.current_title_id = None
+
+        if os.path.exists(db_path):
+            os.remove(db_path)
+        if os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir)
+
+        cmd = [seven_zip, "x", "-y", f"-o{app_dir}", archive_path]
+        result = subprocess.run(
+            cmd,
+            cwd=app_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.db = Database(db_path)
+            raise RuntimeError((result.stderr or result.stdout or "Ошибка восстановления 7z").strip())
+
+        self.db = Database(db_path)
+        self.refresh_titles()
+        self.clear_form()
+
+    def open_backup_dialog(self) -> None:
+        dialog = Gtk.Dialog(title="Резервное копирование", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        dialog.set_default_size(680, 420)
+
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+
+        create_button = Gtk.Button(label="Создать резервную копию")
+        restore_button = Gtk.Button(label="Восстановить")
+        restore_button.set_sensitive(False)
+
+        status_label = Gtk.Label(label="")
+        status_label.set_xalign(0)
+
+        store = Gtk.ListStore(str, str, str)
+        tree = Gtk.TreeView(model=store)
+        renderer = Gtk.CellRendererText()
+        tree.append_column(Gtk.TreeViewColumn("Дата и время", renderer, text=0))
+        tree.append_column(Gtk.TreeViewColumn("Размер", renderer, text=1))
+        tree.set_headers_visible(True)
+
+        selection = tree.get_selection()
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_vexpand(True)
+        scroller.add(tree)
+
+        buttons_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        buttons_row.pack_start(create_button, False, False, 0)
+        buttons_row.pack_start(restore_button, False, False, 0)
+
+        content.pack_start(buttons_row, False, False, 0)
+        content.pack_start(scroller, True, True, 0)
+        content.pack_start(status_label, False, False, 0)
+
+        def refresh_backup_list() -> None:
+            store.clear()
+            for backup in self._list_backups():
+                store.append(
+                    [
+                        backup["created_dt"].strftime("%Y-%m-%d %H:%M"),
+                        self._format_file_size(backup["size"]),
+                        backup["path"],
+                    ]
+                )
+            restore_button.set_sensitive(False)
+
+        def get_selected_path() -> str:
+            model, tree_iter = selection.get_selected()
+            if not tree_iter:
+                return ""
+            return model.get_value(tree_iter, 2)
+
+        def set_status(text: str) -> None:
+            status_label.set_text(text)
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        def on_selection_changed(_selection) -> None:
+            restore_button.set_sensitive(bool(get_selected_path()))
+
+        def on_create_clicked(_button) -> None:
+            try:
+                set_status("Создание резервной копии...")
+                path = self._create_backup_archive()
+                refresh_backup_list()
+                set_status(f"Резервная копия создана: {os.path.basename(path)}")
+            except Exception as exc:
+                set_status(f"Ошибка создания резервной копии: {exc}")
+
+        def on_restore_clicked(_button) -> None:
+            selected_path = get_selected_path()
+            if not selected_path:
+                return
+
+            create_now = self._confirm(
+                "Резервное копирование",
+                "Перед восстановлением рекомендуется создать резервную копию текущих данных. Создать сейчас?",
+            )
+            if create_now:
+                try:
+                    set_status("Создание текущей резервной копии...")
+                    self._create_backup_archive()
+                    refresh_backup_list()
+                except Exception as exc:
+                    set_status(f"Не удалось создать резервную копию перед восстановлением: {exc}")
+                    if not self._confirm(
+                        "Продолжить без копии",
+                        "Продолжить восстановление без резервной копии текущих данных?",
+                    ):
+                        return
+
+            if not self._confirm(
+                "Восстановление",
+                "Текущие данные будут заменены данными из выбранной резервной копии. Продолжить?",
+            ):
+                return
+
+            try:
+                set_status("Восстановление данных...")
+                self._restore_backup_archive(selected_path)
+                set_status("Восстановление завершено.")
+            except Exception as exc:
+                set_status(f"Ошибка восстановления: {exc}")
+
+        selection.connect("changed", on_selection_changed)
+        create_button.connect("clicked", on_create_clicked)
+        restore_button.connect("clicked", on_restore_clicked)
+
+        refresh_backup_list()
+        dialog.show_all()
         dialog.run()
         dialog.destroy()
 
