@@ -860,6 +860,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.is_dirty = False
         self.created_at_value = ""
         self.updated_at_value = ""
+        self._filter_refresh_timeout_id = None
 
         self._build_ui()
         self._load_window_settings()
@@ -963,18 +964,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.filter_sort.append("title", "По названию")
         self.filter_sort.append("created_at", "По дате добавления")
         self.filter_sort.set_active_id("title")
+        self.filter_name.connect("changed", lambda _e: self._schedule_refresh_titles())
+        self.filter_tags.connect("changed", lambda _e: self._schedule_refresh_titles())
+        self.filter_sort.connect("changed", lambda _e: self._schedule_refresh_titles())
         filter_box.pack_start(self._row("Название", self.filter_name), False, False, 0)
         filter_box.pack_start(self._row("Теги", self.filter_tags), False, False, 0)
         filter_box.pack_start(self._row("Статус", self.filter_status_button), False, False, 0)
         filter_box.pack_start(self._row("Сортировка", self.filter_sort), False, False, 0)
-        apply_button = Gtk.Button(label="Применить")
-        apply_button.connect("clicked", lambda _b: self.refresh_titles())
         reset_button = Gtk.Button(label="Сбросить")
         reset_button.connect("clicked", lambda _b: self.reset_filters())
-        filter_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        filter_buttons.pack_start(apply_button, True, True, 0)
-        filter_buttons.pack_start(reset_button, True, True, 0)
-        filter_box.pack_start(filter_buttons, False, False, 0)
+        filter_box.pack_start(reset_button, False, False, 0)
         self._update_filter_status_button_label()
         self.library_box.pack_start(filter_frame, False, False, 0)
 
@@ -1308,6 +1307,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     def _on_filter_status_toggled(self, _button: Gtk.CheckButton) -> None:
         self._update_filter_status_button_label()
+        self._schedule_refresh_titles()
 
     def reset_filters(self) -> None:
         self.filter_name.set_text("")
@@ -1316,7 +1316,23 @@ class HSorterWindow(Gtk.ApplicationWindow):
             check.set_active(False)
         self.filter_sort.set_active_id("title")
         self._update_filter_status_button_label()
+        self._cancel_scheduled_filter_refresh()
         self.refresh_titles()
+
+    def _cancel_scheduled_filter_refresh(self) -> None:
+        if self._filter_refresh_timeout_id is None:
+            return
+        GLib.source_remove(self._filter_refresh_timeout_id)
+        self._filter_refresh_timeout_id = None
+
+    def _schedule_refresh_titles(self) -> None:
+        self._cancel_scheduled_filter_refresh()
+        self._filter_refresh_timeout_id = GLib.timeout_add(500, self._run_scheduled_refresh_titles)
+
+    def _run_scheduled_refresh_titles(self) -> bool:
+        self._filter_refresh_timeout_id = None
+        self.refresh_titles()
+        return False
 
     # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
