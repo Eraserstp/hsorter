@@ -13,6 +13,7 @@ import math
 import requests
 import time
 import random
+import py7zr
 
 import gi
 import re
@@ -3152,12 +3153,11 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _cache_dir_path(self) -> str:
         return os.path.join(self._app_dir(), ".hsorter_cache")
 
-    # Поиск доступной утилиты 7z в PATH (поддерживаем 7z и 7zz).
-    def _seven_zip_command(self) -> str | None:
-        for candidate in ("7z", "7zz"):
-            if shutil.which(candidate):
-                return candidate
-        return None
+    # Проверяем доступность библиотеки py7zr для работы с архивами резервных копий.
+    # Если зависимость отсутствует, сразу даём понятное сообщение пользователю.
+    def _ensure_py7zr(self) -> None:
+        if py7zr is None:
+            raise RuntimeError("Библиотека py7zr не установлена. Установите пакет py7zr.")
 
     # Форматирование размера файла в человекочитаемый вид (Б/КБ/МБ/...).
     def _format_file_size(self, size_bytes: int) -> str:
@@ -3203,70 +3203,72 @@ class HSorterWindow(Gtk.ApplicationWindow):
             )
         return sorted(backups, key=lambda item: item["created_dt"], reverse=True)
 
-    # Создание резервной копии в формате 7z с максимальным сжатием.
-    # В архив включаем только рабочую БД и каталог кеша приложения.
+    # Сбор всех файлов, которые должны попасть в резервную копию.
+    # Возвращает пары (абсолютный путь, относительное имя внутри архива).
+    def _backup_sources(self) -> list[tuple[str, str]]:
+        files: list[tuple[str, str]] = []
+        db_path = self.db.path
+        if os.path.exists(db_path):
+            files.append((db_path, os.path.basename(db_path)))
+
+        cache_dir = self._cache_dir_path()
+        if os.path.isdir(cache_dir):
+            for root, _dirs, filenames in os.walk(cache_dir):
+                for filename in filenames:
+                    abs_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(abs_path, self._app_dir())
+                    files.append((abs_path, rel_path))
+        return files
+
+    # Создание резервной копии через py7zr с максимальным сжатием LZMA2.
+    # Прогресс отображаем по суммарному размеру обрабатываемых файлов.
     def _create_backup_archive(self, progress: Gtk.ProgressBar | None = None) -> str:
-        seven_zip = self._seven_zip_command()
-        if not seven_zip:
-            raise RuntimeError("Утилита 7z не найдена в системе.")
+        self._ensure_py7zr()
 
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
         archive_name = f"hsorter_backup_{timestamp}.7z"
         archive_path = os.path.join(self._backups_dir(), archive_name)
-        db_filename = os.path.basename(self.db.path)
-        cache_name = os.path.basename(self._cache_dir_path())
 
-        cmd = [
-            seven_zip,
-            "a",
-            "-t7z",
-            "-mx=9",
+        sources = self._backup_sources()
+        total_bytes = sum(os.path.getsize(src) for src, _ in sources) or 1
+        done_bytes = 0
+
+        if progress:
+            progress.set_fraction(0.0)
+            progress.set_text("0%")
+
+        with py7zr.SevenZipFile(
             archive_path,
-            db_filename,
-            cache_name,
-        ]
-        self._run_command_with_progress(cmd, self._app_dir(), progress)
+            mode="w",
+            filters=[{"id": py7zr.FILTER_LZMA2, "preset": 9}],
+        ) as archive:
+            for src, arcname in sources:
+                archive.write(src, arcname)
+                done_bytes += os.path.getsize(src)
+                if progress:
+                    fraction = min(1.0, done_bytes / total_bytes)
+                    progress.set_fraction(fraction)
+                    progress.set_text(f"{int(fraction * 100)}%")
+                while Gtk.events_pending():
+                    Gtk.main_iteration_do(False)
+
+        if progress:
+            progress.set_fraction(1.0)
+            progress.set_text("100%")
         return archive_path
 
-    # Запуск внешней команды с анимированным progress bar для длительных операций.
-    # Используем pulse-режим, т.к. 7z не даёт стабильного процента для простого парсинга.
-    def _run_command_with_progress(
-        self,
-        cmd: list[str],
-        cwd: str,
-        progress: Gtk.ProgressBar | None = None,
-    ) -> None:
-        process = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        while process.poll() is None:
-            if progress:
-                progress.pulse()
-            while Gtk.events_pending():
-                Gtk.main_iteration_do(False)
-            time.sleep(0.06)
-        stdout, stderr = process.communicate()
-        if process.returncode != 0:
-            raise RuntimeError((stderr or stdout or "Ошибка выполнения команды").strip())
-
-    # Восстановление данных из выбранной резервной копии.
+    # Восстановление данных из выбранной резервной копии через py7zr.
     # Текущая БД/кеш удаляются, затем архив распаковывается в каталог приложения.
     def _restore_backup_archive(self, archive_path: str, progress: Gtk.ProgressBar | None = None) -> None:
-        seven_zip = self._seven_zip_command()
-        if not seven_zip:
-            raise RuntimeError("Утилита 7z не найдена в системе.")
+        self._ensure_py7zr()
 
         db_path = self.db.path
         cache_dir = self._cache_dir_path()
         app_dir = self._app_dir()
 
         if progress:
-            progress.set_fraction(0.1)
-            progress.set_text("Подготовка...")
+            progress.set_fraction(0.05)
+            progress.set_text("5%")
 
         self.db.conn.close()
         self.current_title_id = None
@@ -3276,20 +3278,27 @@ class HSorterWindow(Gtk.ApplicationWindow):
         if os.path.isdir(cache_dir):
             shutil.rmtree(cache_dir)
 
-        if progress:
-            progress.set_fraction(0.35)
-            progress.set_text("Распаковка...")
+        with py7zr.SevenZipFile(archive_path, mode="r") as archive:
+            entries = archive.list()
+            total_bytes = sum(getattr(item, "uncompressed", 0) or 0 for item in entries) or len(entries) or 1
+            done_bytes = 0
+            names = [item.filename for item in entries if item.filename]
+            if not names:
+                names = archive.getnames()
+            for name in names:
+                archive.extract(path=app_dir, targets=[name])
+                size_guess = next((getattr(item, "uncompressed", 0) or 0 for item in entries if item.filename == name), 0)
+                done_bytes += size_guess if size_guess > 0 else 1
+                if progress:
+                    fraction = 0.1 + min(0.85, (done_bytes / total_bytes) * 0.85)
+                    progress.set_fraction(fraction)
+                    progress.set_text(f"{int(fraction * 100)}%")
+                while Gtk.events_pending():
+                    Gtk.main_iteration_do(False)
 
-        cmd = [seven_zip, "x", "-y", f"-o{app_dir}", archive_path]
-        try:
-            self._run_command_with_progress(cmd, app_dir, progress)
-        except Exception:
-            self.db = Database(db_path)
-            raise
-
         if progress:
-            progress.set_fraction(0.9)
-            progress.set_text("Инициализация...")
+            progress.set_fraction(0.96)
+            progress.set_text("96%")
 
         self.db = Database(db_path)
         self.refresh_titles()
@@ -3379,12 +3388,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
         def on_create_clicked(_button) -> None:
             set_busy(True)
             progress.set_fraction(0.0)
-            progress.set_text("Архивация...")
+            progress.set_text("0%")
             try:
                 set_status("Создание резервной копии...")
                 path = self._create_backup_archive(progress)
-                progress.set_fraction(1.0)
-                progress.set_text("100%")
                 refresh_backup_list()
                 set_status(f"Резервная копия создана: {os.path.basename(path)}")
             except Exception as exc:
@@ -3405,12 +3412,10 @@ class HSorterWindow(Gtk.ApplicationWindow):
             if create_now:
                 set_busy(True)
                 progress.set_fraction(0.0)
-                progress.set_text("Архивация...")
+                progress.set_text("0%")
                 try:
                     set_status("Создание текущей резервной копии...")
                     self._create_backup_archive(progress)
-                    progress.set_fraction(1.0)
-                    progress.set_text("100%")
                     refresh_backup_list()
                 except Exception as exc:
                     progress.set_text("Ошибка")
@@ -3432,7 +3437,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
             set_busy(True)
             progress.set_fraction(0.0)
-            progress.set_text("Подготовка...")
+            progress.set_text("0%")
             try:
                 set_status("Восстановление данных...")
                 self._restore_backup_archive(selected_path, progress)
