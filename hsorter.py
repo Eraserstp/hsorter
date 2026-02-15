@@ -41,6 +41,16 @@ STATUS_OPTIONS = [
     "импортировано",
 ]
 
+ISO_639_1_CODES = [
+    "af", "am", "ar", "az", "be", "bg", "bn", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "eo", "es", "et", "eu", "fa", "fi", "fil", "fr", "ga",
+    "gl", "gu", "he", "hi", "hr", "hu", "hy", "id", "is", "it", "ja", "ka",
+    "kk", "km", "kn", "ko", "ku", "ky", "la", "lb", "lt", "lv", "mk", "ml",
+    "mn", "mr", "ms", "mt", "my", "nb", "ne", "nl", "nn", "no", "pa", "pl",
+    "ps", "pt", "ro", "ru", "si", "sk", "sl", "sq", "sr", "sv", "sw", "ta",
+    "te", "th", "tr", "tt", "uk", "ur", "uz", "vi", "zh",
+]
+
 
 # Обёртка над SQLite для хранения карточек тайтлов и медиафайлов.
 class Database:
@@ -575,6 +585,58 @@ class Database:
             )
         self.conn.commit()
 
+    def get_video_hardsub_override(self, media_id: int) -> tuple[bool, str]:
+        cur = self.conn.cursor()
+        row = cur.execute(
+            """
+            SELECT hardsub, hardsub_language
+            FROM video_track_overrides
+            WHERE media_id=? AND track_type='__video__' AND track_index=-1
+            """,
+            (media_id,),
+        ).fetchone()
+        if not row:
+            return False, ""
+        return bool(row["hardsub"]), row["hardsub_language"] or ""
+
+    def set_title_status_flag(self, title_id: int, status_name: str, enabled: bool) -> None:
+        cur = self.conn.cursor()
+        row = cur.execute("SELECT status_json FROM titles WHERE id=?", (title_id,)).fetchone()
+        if not row:
+            return
+        try:
+            status_data = json.loads(row["status_json"] or "{}")
+        except json.JSONDecodeError:
+            status_data = {}
+        status_data[status_name] = bool(enabled)
+        cur.execute(
+            "UPDATE titles SET status_json=?, updated_at=? WHERE id=?",
+            (
+                json.dumps(status_data, ensure_ascii=False),
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                title_id,
+            ),
+        )
+        self.conn.commit()
+
+    def title_has_hardsub_video(self, title_id: int) -> bool:
+        cur = self.conn.cursor()
+        row = cur.execute(
+            """
+            SELECT 1
+            FROM media m
+            JOIN video_track_overrides vto ON vto.media_id = m.id
+            WHERE m.title_id=?
+              AND m.media_type='video'
+              AND vto.track_type='__video__'
+              AND vto.track_index=-1
+              AND vto.hardsub=1
+            LIMIT 1
+            """,
+            (title_id,),
+        ).fetchone()
+        return row is not None
+
     def get_tag_rules(self):
         cur = self.conn.execute(
             "SELECT id, position, search, replace "
@@ -798,6 +860,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.is_dirty = False
         self.created_at_value = ""
         self.updated_at_value = ""
+        self._filter_refresh_timeout_id = None
 
         self._build_ui()
         self._load_window_settings()
@@ -817,18 +880,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         self.library_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.details_box_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.media_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.library_box.set_size_request(100, -1)
         self.details_box.set_size_request(100, -1)
         self.media_box.set_size_request(100, -1)
+        self.details_box_container.set_margin_start(12)
+        self.details_box_container.pack_start(self.details_box, True, True, 0)
 
         self.main_paned.add1(self.library_box)
         self.right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.right_paned.add1(self.details_box)
+        self.right_paned.add1(self.details_box_container)
         self.right_paned.add2(self.media_box)
         self.main_paned.add2(self.right_paned)
-        self.main_paned.set_wide_handle(True)
-        self.right_paned.set_wide_handle(True)
+        self.main_paned.set_wide_handle(False)
+        self.right_paned.set_wide_handle(False)
 
         self._build_library()
         self._build_details()
@@ -898,18 +964,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.filter_sort.append("title", "По названию")
         self.filter_sort.append("created_at", "По дате добавления")
         self.filter_sort.set_active_id("title")
+        self.filter_name.connect("changed", lambda _e: self._schedule_refresh_titles())
+        self.filter_tags.connect("changed", lambda _e: self._schedule_refresh_titles())
+        self.filter_sort.connect("changed", lambda _e: self._schedule_refresh_titles())
         filter_box.pack_start(self._row("Название", self.filter_name), False, False, 0)
         filter_box.pack_start(self._row("Теги", self.filter_tags), False, False, 0)
         filter_box.pack_start(self._row("Статус", self.filter_status_button), False, False, 0)
         filter_box.pack_start(self._row("Сортировка", self.filter_sort), False, False, 0)
-        apply_button = Gtk.Button(label="Применить")
-        apply_button.connect("clicked", lambda _b: self.refresh_titles())
         reset_button = Gtk.Button(label="Сбросить")
         reset_button.connect("clicked", lambda _b: self.reset_filters())
-        filter_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        filter_buttons.pack_start(apply_button, True, True, 0)
-        filter_buttons.pack_start(reset_button, True, True, 0)
-        filter_box.pack_start(filter_buttons, False, False, 0)
+        filter_box.pack_start(reset_button, False, False, 0)
         self._update_filter_status_button_label()
         self.library_box.pack_start(filter_frame, False, False, 0)
 
@@ -1243,6 +1307,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     def _on_filter_status_toggled(self, _button: Gtk.CheckButton) -> None:
         self._update_filter_status_button_label()
+        self._schedule_refresh_titles()
 
     def reset_filters(self) -> None:
         self.filter_name.set_text("")
@@ -1251,7 +1316,23 @@ class HSorterWindow(Gtk.ApplicationWindow):
             check.set_active(False)
         self.filter_sort.set_active_id("title")
         self._update_filter_status_button_label()
+        self._cancel_scheduled_filter_refresh()
         self.refresh_titles()
+
+    def _cancel_scheduled_filter_refresh(self) -> None:
+        if self._filter_refresh_timeout_id is None:
+            return
+        GLib.source_remove(self._filter_refresh_timeout_id)
+        self._filter_refresh_timeout_id = None
+
+    def _schedule_refresh_titles(self) -> None:
+        self._cancel_scheduled_filter_refresh()
+        self._filter_refresh_timeout_id = GLib.timeout_add(500, self._run_scheduled_refresh_titles)
+
+    def _run_scheduled_refresh_titles(self) -> bool:
+        self._filter_refresh_timeout_id = None
+        self.refresh_titles()
+        return False
 
     # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
@@ -1511,7 +1592,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             ).strip(),
             "url": self.url_entry.get_text().strip(),
             "status": status_data,
-            "tags": self._get_tags_text().strip(),
+            "tags": "; ".join(self._normalize_tag_tokens(self._get_tags_text())),
             "cover_path": self.cover_path,
             "created_at": self.created_at_value,
             "updated_at": self.updated_at_value,
@@ -1577,7 +1658,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._mark_dirty()
 
     def _normalize_tag_tokens(self, raw_tags: str) -> list[str]:
-        normalized = (raw_tags or "").replace(",", ";")
+        normalized = (raw_tags or "").replace("\r", "\n")
+        for separator in [",", "\n"]:
+            normalized = normalized.replace(separator, ";")
         parts = [part.strip() for part in normalized.split(";") if part.strip()]
         return parts
 
@@ -2443,7 +2526,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         data = {}
         for row in rows:
             raw = row["tags"] or ""
-            parts = [p.strip() for p in raw.replace(",", ";").split(";") if p.strip()]
+            parts = self._normalize_tag_tokens(raw)
             for tag in parts:
                 data[tag] = data.get(tag, 0) + 1
         return data
@@ -3174,10 +3257,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         copy_button = Gtk.Button(label="Копировать")
+        merge_button = Gtk.Button(label="Слияние")
         copy_all_button = Gtk.Button(label="Копировать всё")
         prev_button = Gtk.Button(label="Назад")
         next_button = Gtk.Button(label="Далее")
         action_row.pack_start(copy_button, False, False, 0)
+        action_row.pack_start(merge_button, False, False, 0)
         action_row.pack_start(copy_all_button, False, False, 0)
         action_row.pack_end(next_button, False, False, 0)
         action_row.pack_end(prev_button, False, False, 0)
@@ -3200,6 +3285,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             remote_value = anidb_data.get(key, "")
             local_buffer.set_text(local_value)
             remote_buffer.set_text(remote_value)
+            merge_button.set_sensitive(key == "tags")
             if multiline:
                 local_view.set_size_request(-1, 180)
                 remote_view.set_size_request(-1, 180)
@@ -3230,6 +3316,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
             data[key] = anidb_data.get(key, "")
             local_buffer.set_text(data[key])
 
+        def merge_current() -> None:
+            key, _, _ = fields[index]
+            if key != "tags":
+                return
+            local_raw = local_buffer.get_text(
+                local_buffer.get_start_iter(),
+                local_buffer.get_end_iter(),
+                True,
+            )
+            local_tags = self._normalize_tag_tokens(local_raw)
+            remote_tags = self._normalize_tag_tokens(anidb_data.get("tags", ""))
+            merged = sorted(set(local_tags + remote_tags))
+            data["tags"] = "; ".join(merged)
+            local_buffer.set_text(data["tags"])
+
         def copy_all() -> None:
             if not self._confirm(
                 "Скопировать всё", "Данные тайтла будут перезаписаны целиком! Продолжить?"
@@ -3256,6 +3357,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 dialog.response(Gtk.ResponseType.OK)
 
         copy_button.connect("clicked", lambda _b: copy_current())
+        merge_button.connect("clicked", lambda _b: merge_current())
         copy_all_button.connect("clicked", lambda _b: copy_all())
         prev_button.connect("clicked", lambda _b: go_prev())
         next_button.connect("clicked", lambda _b: go_next())
@@ -3432,6 +3534,46 @@ class HSorterWindow(Gtk.ApplicationWindow):
         path_row.pack_start(path_entry, True, True, 0)
         path_row.pack_start(open_dir, False, False, 0)
         center_column.pack_start(path_row, False, False, 0)
+
+        hardsub_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        hardsub_check = Gtk.CheckButton(label="Хардсаб")
+        hardsub_lang_combo = Gtk.ComboBoxText()
+        hardsub_lang_combo.append_text("")
+        for code in ISO_639_1_CODES:
+            hardsub_lang_combo.append_text(code)
+        hardsub_row.pack_start(hardsub_check, False, False, 0)
+        hardsub_row.pack_start(Gtk.Label(label="Язык хардсаба (ISO 639-1)", xalign=0), False, False, 0)
+        hardsub_row.pack_start(hardsub_lang_combo, False, False, 0)
+        center_column.pack_start(hardsub_row, False, False, 0)
+
+        current_hardsub, current_hardsub_lang = self.db.get_video_hardsub_override(media_id)
+        hardsub_check.set_active(current_hardsub)
+        hardsub_lang_combo.set_sensitive(current_hardsub)
+        if current_hardsub_lang in ISO_639_1_CODES:
+            hardsub_lang_combo.set_active(ISO_639_1_CODES.index(current_hardsub_lang) + 1)
+        else:
+            hardsub_lang_combo.set_active(0)
+
+        def persist_video_hardsub() -> None:
+            lang = hardsub_lang_combo.get_active_text() or ""
+            enabled = hardsub_check.get_active()
+            self.db.upsert_track_override(media_id, "__video__", -1, "", enabled, lang)
+            has_hardsub = self.db.title_has_hardsub_video(media_row["title_id"])
+            self.db.set_title_status_flag(media_row["title_id"], "хардсаб", has_hardsub)
+            if self.current_title_id == media_row["title_id"] and "хардсаб" in self.status_checks:
+                was_dirty = self.is_dirty
+                self.status_checks["хардсаб"].set_active(has_hardsub)
+                if not was_dirty:
+                    self._clear_dirty()
+                self.updated_at_value = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                self.updated_at_label.set_text(self._format_date(self.updated_at_value))
+            self.refresh_titles()
+
+        hardsub_check.connect(
+            "toggled",
+            lambda _b: (hardsub_lang_combo.set_sensitive(hardsub_check.get_active()), persist_video_hardsub()),
+        )
+        hardsub_lang_combo.connect("changed", lambda _b: persist_video_hardsub())
 
         def set_thumbnail(path_value: str) -> None:
             nonlocal thumb_path
