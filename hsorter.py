@@ -2126,6 +2126,51 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "password": self.db.get_setting("anidb_password") or "",
         }
 
+    def _get_emby_settings(self) -> dict:
+        return {
+            "server": self.db.get_setting("emby_server") or "",
+            "api_key": self.db.get_setting("emby_api_key") or "",
+            "user_id": self.db.get_setting("emby_user_id") or "",
+            "server_id": self.db.get_setting("emby_server_id") or "",
+            "parent_id": self.db.get_setting("emby_parent_id") or "",
+        }
+
+    def _emby_base_url(self, server: str) -> str:
+        value = (server or "").strip()
+        if not value:
+            return ""
+        if value.startswith(("http://", "https://")):
+            return value.rstrip("/")
+        return f"http://{value}".rstrip("/")
+
+    def _check_emby_connection(self, settings: dict) -> tuple[bool, str]:
+        base_url = self._emby_base_url(settings.get("server", ""))
+        if not base_url:
+            return False, "Укажите адрес сервера Emby."
+        if not settings.get("api_key"):
+            return False, "Укажите API ключ Emby."
+        params = {"api_key": settings["api_key"]}
+        try:
+            info_resp = requests.get(f"{base_url}/System/Info", params=params, timeout=15)
+            info_resp.raise_for_status()
+            server_name = info_resp.json().get("ServerName", "Emby")
+        except Exception as exc:
+            return False, f"Не удалось подключиться к Emby: {exc}"
+
+        user_id = (settings.get("user_id") or "").strip()
+        if user_id:
+            try:
+                user_resp = requests.get(
+                    f"{base_url}/Users/{user_id}",
+                    params=params,
+                    timeout=15,
+                )
+                user_resp.raise_for_status()
+            except Exception as exc:
+                return False, f"Подключение есть, но пользователь недоступен: {exc}"
+
+        return True, f"Подключение к {server_name} успешно."
+
     def open_statistics_dialog(self) -> None:
         dialog = Gtk.Dialog(title="Статистика", transient_for=self, modal=True)
         dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
@@ -2293,6 +2338,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         validate_tags_button = Gtk.Button(label="Валидация тегов")
         validate_tags_button.connect("clicked", lambda _b: self.validate_tags())
         content.add(validate_tags_button)
+        export_emby_button = Gtk.Button(label="Экспорт данных в Emby")
+        export_emby_button.connect("clicked", lambda _b: self.export_to_emby())
+        content.add(export_emby_button)
         dialog.show_all()
         dialog.run()
         dialog.destroy()
@@ -2824,13 +2872,229 @@ class HSorterWindow(Gtk.ApplicationWindow):
         anidb_box.pack_start(grid, False, False, 0)
         content.add(anidb_frame)
 
+        emby_frame = Gtk.Frame(label="Emby")
+        emby_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        emby_box.set_margin_top(6)
+        emby_box.set_margin_bottom(6)
+        emby_box.set_margin_start(6)
+        emby_box.set_margin_end(6)
+        emby_frame.add(emby_box)
+
+        emby_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+        emby_server_entry = Gtk.Entry()
+        emby_api_key_entry = Gtk.Entry()
+        emby_user_id_entry = Gtk.Entry()
+        emby_server_id_entry = Gtk.Entry()
+        emby_parent_id_entry = Gtk.Entry()
+        emby_settings = self._get_emby_settings()
+        emby_server_entry.set_text(emby_settings["server"])
+        emby_api_key_entry.set_text(emby_settings["api_key"])
+        emby_user_id_entry.set_text(emby_settings["user_id"])
+        emby_server_id_entry.set_text(emby_settings["server_id"])
+        emby_parent_id_entry.set_text(emby_settings["parent_id"])
+
+        emby_labels = [
+            ("Сервер", emby_server_entry),
+            ("API ключ", emby_api_key_entry),
+            ("ID пользователя", emby_user_id_entry),
+            ("Server ID", emby_server_id_entry),
+            ("Parent ID", emby_parent_id_entry),
+        ]
+        for idx, (label, entry) in enumerate(emby_labels):
+            emby_grid.attach(Gtk.Label(label=label, xalign=0), 0, idx, 1, 1)
+            emby_grid.attach(entry, 1, idx, 1, 1)
+        emby_box.pack_start(emby_grid, False, False, 0)
+
+        test_button = Gtk.Button(label="Проверить подключение")
+
+        def build_emby_settings() -> dict:
+            return {
+                "server": emby_server_entry.get_text().strip(),
+                "api_key": emby_api_key_entry.get_text().strip(),
+                "user_id": emby_user_id_entry.get_text().strip(),
+                "server_id": emby_server_id_entry.get_text().strip(),
+                "parent_id": emby_parent_id_entry.get_text().strip(),
+            }
+
+        test_button.connect(
+            "clicked",
+            lambda _b: self._message(
+                "Emby",
+                self._check_emby_connection(build_emby_settings())[1],
+            ),
+        )
+        emby_box.pack_start(test_button, False, False, 0)
+        content.add(emby_frame)
+
         dialog.show_all()
         response = dialog.run()
         if response == Gtk.ResponseType.OK:
             self.db.set_setting("anidb_username", username_entry.get_text().strip())
             self.db.set_setting("anidb_password", password_entry.get_text())
+            current_emby = build_emby_settings()
+            self.db.set_setting("emby_server", current_emby["server"])
+            self.db.set_setting("emby_api_key", current_emby["api_key"])
+            self.db.set_setting("emby_user_id", current_emby["user_id"])
+            self.db.set_setting("emby_server_id", current_emby["server_id"])
+            self.db.set_setting("emby_parent_id", current_emby["parent_id"])
         dialog.destroy()
 
+
+    def export_to_emby(self) -> None:
+        settings = self._get_emby_settings()
+        ready, message = self._check_emby_connection(settings)
+        if not ready:
+            self._message("Emby", message)
+            return
+
+        base_url = self._emby_base_url(settings["server"])
+        params = {"api_key": settings["api_key"]}
+        if settings.get("server_id"):
+            params["serverId"] = settings["server_id"]
+
+        dialog = Gtk.Dialog(title="Экспорт в Emby", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        close_button = dialog.get_widget_for_response(Gtk.ResponseType.CLOSE)
+        if close_button:
+            close_button.set_sensitive(False)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        status_label = Gtk.Label(label="Подготовка...")
+        status_label.set_xalign(0)
+        progress = Gtk.ProgressBar()
+        progress.set_show_text(True)
+        content.add(status_label)
+        content.add(progress)
+        dialog.show_all()
+
+        def pump() -> None:
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        try:
+            items_params = params.copy()
+            items_params.update(
+                {
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Series",
+                    "Fields": "OriginalTitle,Path,ProviderIds,Tags",
+                    "Limit": "10000",
+                }
+            )
+            if settings.get("parent_id"):
+                items_params["ParentId"] = settings["parent_id"]
+            user_id = settings.get("user_id", "").strip()
+            if user_id:
+                items_url = f"{base_url}/Users/{user_id}/Items"
+            else:
+                items_url = f"{base_url}/Items"
+            emby_resp = requests.get(items_url, params=items_params, timeout=30)
+            emby_resp.raise_for_status()
+            emby_items = emby_resp.json().get("Items", [])
+
+            by_name = {}
+            by_dir = {}
+            for item in emby_items:
+                for value in [item.get("Name", ""), item.get("OriginalTitle", "")]:
+                    key = value.strip().lower()
+                    if key and key not in by_name:
+                        by_name[key] = item
+                path_value = (item.get("Path") or "").replace("\\", "/").rstrip("/")
+                if path_value:
+                    folder = path_value.split("/")[-1].strip().lower()
+                    if folder and folder not in by_dir:
+                        by_dir[folder] = item
+
+            title_rows = self.db.conn.execute(
+                "SELECT id, main_title, alt_titles, tags, url FROM titles ORDER BY id"
+            ).fetchall()
+            total = len(title_rows)
+            exported = 0
+            matched = 0
+
+            for idx, row in enumerate(title_rows, start=1):
+                names = [row["main_title"] or ""]
+                names.extend(
+                    [part.strip() for part in (row["alt_titles"] or "").split(";") if part.strip()]
+                )
+                title_dirs = []
+                media_rows = self.db.conn.execute(
+                    "SELECT path FROM media WHERE title_id=? AND media_type='video'",
+                    (row["id"],),
+                ).fetchall()
+                for media in media_rows:
+                    media_path = (media["path"] or "").replace("\\", "/").rstrip("/")
+                    if not media_path:
+                        continue
+                    parts = media_path.split("/")
+                    if len(parts) > 1:
+                        title_dirs.append(parts[-2].strip().lower())
+
+                emby_item = None
+                for name in names:
+                    key = name.lower().strip()
+                    if key in by_name:
+                        emby_item = by_name[key]
+                        break
+                if not emby_item:
+                    for folder in title_dirs:
+                        if folder in by_dir:
+                            emby_item = by_dir[folder]
+                            break
+
+                if emby_item:
+                    matched += 1
+                    item_id = emby_item.get("Id")
+                    if item_id:
+                        item_url = f"{base_url}/Users/{user_id}/Items/{item_id}" if user_id else f"{base_url}/Items/{item_id}"
+                        item_resp = requests.get(item_url, params=params, timeout=30)
+                        item_resp.raise_for_status()
+                        payload = item_resp.json()
+
+                        tags = [{"Name": tag} for tag in self._normalize_tag_tokens(row["tags"] or "")]
+                        payload["TagItems"] = tags
+
+                        providers = payload.get("ProviderIds") or {}
+                        anime_id = self._extract_anidb_id((row["url"] or "").strip())
+                        if anime_id:
+                            providers["AniDB"] = anime_id
+                            payload["ProviderIds"] = providers
+
+                        update_url = f"{base_url}/emby/Items/{item_id}"
+                        requests.post(
+                            update_url,
+                            params=params,
+                            data=json.dumps(payload),
+                            headers={"Content-Type": "application/json"},
+                            timeout=30,
+                        ).raise_for_status()
+                        exported += 1
+
+                status_label.set_text(
+                    f"Экспорт в Emby: {idx}/{total}. Сопоставлено: {matched}, экспортировано: {exported}."
+                )
+                progress.set_fraction(1.0 if total == 0 else idx / total)
+                progress.set_text(f"{idx}/{total}")
+                pump()
+
+            status_label.set_text(
+                f"Готово. Экспортировано: {exported} из {total}. Сопоставлено: {matched}."
+            )
+            progress.set_fraction(1.0 if total else 0.0)
+            progress.set_text(f"{total}/{total}" if total else "0/0")
+        except Exception as exc:
+            status_label.set_text(f"Ошибка экспорта: {exc}")
+            progress.set_text("Ошибка")
+        finally:
+            if close_button:
+                close_button.set_sensitive(True)
+
+        dialog.run()
+        dialog.destroy()
 
     def open_tagrules_dialog(self):
         dialog = Gtk.Dialog(
