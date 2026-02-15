@@ -33,12 +33,25 @@ STATUS_OPTIONS = [
     "отсутствует",
     "хардсаб",
     "проблемы перевода",
+    "отсутствует перевод",
+    "отсутствуют теги",
+    "неполные теги",
     "частично отсутствует",
     "водяной знак",
     "проблема озвучки",
     "дефекты видео",
     "известна лучшая версия",
     "импортировано",
+]
+
+ISO_639_1_CODES = [
+    "af", "am", "ar", "az", "be", "bg", "bn", "bs", "ca", "cs", "cy", "da",
+    "de", "el", "en", "eo", "es", "et", "eu", "fa", "fi", "fil", "fr", "ga",
+    "gl", "gu", "he", "hi", "hr", "hu", "hy", "id", "is", "it", "ja", "ka",
+    "kk", "km", "kn", "ko", "ku", "ky", "la", "lb", "lt", "lv", "mk", "ml",
+    "mn", "mr", "ms", "mt", "my", "nb", "ne", "nl", "nn", "no", "pa", "pl",
+    "ps", "pt", "ro", "ru", "si", "sk", "sl", "sq", "sr", "sv", "sw", "ta",
+    "te", "th", "tr", "tt", "uk", "ur", "uz", "vi", "zh",
 ]
 
 
@@ -61,7 +74,7 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 main_title TEXT NOT NULL,
                 alt_titles TEXT DEFAULT "",
-                rating INTEGER,
+                rating REAL,
                 personal_rating INTEGER,
                 censored INTEGER DEFAULT 0,
                 year_start INTEGER,
@@ -171,6 +184,7 @@ class Database:
             cur.execute("ALTER TABLE titles ADD COLUMN created_at TEXT DEFAULT ''")
         if not self._column_exists("titles", "updated_at"):
             cur.execute("ALTER TABLE titles ADD COLUMN updated_at TEXT DEFAULT ''")
+        self._migrate_titles_rating_to_real()
         self.conn.commit()
 
     # Проверяем наличие колонки в таблице.
@@ -178,6 +192,80 @@ class Database:
         cur = self.conn.cursor()
         columns = cur.execute(f"PRAGMA table_info({table})").fetchall()
         return any(col["name"] == column for col in columns)
+
+    def _migrate_titles_rating_to_real(self) -> None:
+        cur = self.conn.cursor()
+        columns = cur.execute("PRAGMA table_info(titles)").fetchall()
+        rating_column = next((col for col in columns if col["name"] == "rating"), None)
+        if not rating_column:
+            return
+        column_type = str(rating_column["type"] or "").upper()
+        if "REAL" in column_type:
+            return
+
+        cur.execute("PRAGMA foreign_keys=OFF")
+        try:
+            cur.execute("ALTER TABLE titles RENAME TO titles_old")
+            cur.execute(
+                """
+                CREATE TABLE titles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    main_title TEXT NOT NULL,
+                    alt_titles TEXT DEFAULT "",
+                    rating REAL,
+                    personal_rating INTEGER,
+                    censored INTEGER DEFAULT 0,
+                    year_start INTEGER,
+                    year_end INTEGER,
+                    episodes INTEGER DEFAULT 0,
+                    total_duration TEXT DEFAULT "",
+                    description TEXT DEFAULT "",
+                    country TEXT DEFAULT "",
+                    production TEXT DEFAULT "",
+                    director TEXT DEFAULT "",
+                    character_designer TEXT DEFAULT "",
+                    author TEXT DEFAULT "",
+                    composer TEXT DEFAULT "",
+                    subtitles_author TEXT DEFAULT "",
+                    voice_author TEXT DEFAULT "",
+                    title_comment TEXT DEFAULT "",
+                    url TEXT DEFAULT "",
+                    created_at TEXT DEFAULT "",
+                    updated_at TEXT DEFAULT "",
+                    status_json TEXT DEFAULT "{}",
+                    tags TEXT DEFAULT "",
+                    cover_path TEXT DEFAULT ""
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO titles (
+                    id, main_title, alt_titles, rating, personal_rating, censored,
+                    year_start, year_end, episodes, total_duration, description,
+                    country, production, director, character_designer, author,
+                    composer, subtitles_author, voice_author, title_comment, url,
+                    created_at, updated_at, status_json, tags, cover_path
+                )
+                SELECT
+                    id, main_title, alt_titles,
+                    CASE
+                        WHEN rating IS NULL OR TRIM(CAST(rating AS TEXT)) = '' THEN NULL
+                        ELSE CAST(rating AS REAL)
+                    END,
+                    personal_rating, censored,
+                    year_start, year_end, episodes, total_duration, description,
+                    country, production, director, character_designer, author,
+                    composer, subtitles_author, voice_author, title_comment, url,
+                    created_at, updated_at, status_json, tags, cover_path
+                FROM titles_old
+                """
+            )
+            cur.execute("DROP TABLE titles_old")
+        except Exception:
+            raise
+        finally:
+            cur.execute("PRAGMA foreign_keys=ON")
 
     # Получение списка тайтлов с фильтрами по названию, тегам и статусам.
     def list_titles(
@@ -575,6 +663,58 @@ class Database:
             )
         self.conn.commit()
 
+    def get_video_hardsub_override(self, media_id: int) -> tuple[bool, str]:
+        cur = self.conn.cursor()
+        row = cur.execute(
+            """
+            SELECT hardsub, hardsub_language
+            FROM video_track_overrides
+            WHERE media_id=? AND track_type='__video__' AND track_index=-1
+            """,
+            (media_id,),
+        ).fetchone()
+        if not row:
+            return False, ""
+        return bool(row["hardsub"]), row["hardsub_language"] or ""
+
+    def set_title_status_flag(self, title_id: int, status_name: str, enabled: bool) -> None:
+        cur = self.conn.cursor()
+        row = cur.execute("SELECT status_json FROM titles WHERE id=?", (title_id,)).fetchone()
+        if not row:
+            return
+        try:
+            status_data = json.loads(row["status_json"] or "{}")
+        except json.JSONDecodeError:
+            status_data = {}
+        status_data[status_name] = bool(enabled)
+        cur.execute(
+            "UPDATE titles SET status_json=?, updated_at=? WHERE id=?",
+            (
+                json.dumps(status_data, ensure_ascii=False),
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                title_id,
+            ),
+        )
+        self.conn.commit()
+
+    def title_has_hardsub_video(self, title_id: int) -> bool:
+        cur = self.conn.cursor()
+        row = cur.execute(
+            """
+            SELECT 1
+            FROM media m
+            JOIN video_track_overrides vto ON vto.media_id = m.id
+            WHERE m.title_id=?
+              AND m.media_type='video'
+              AND vto.track_type='__video__'
+              AND vto.track_index=-1
+              AND vto.hardsub=1
+            LIMIT 1
+            """,
+            (title_id,),
+        ).fetchone()
+        return row is not None
+
     def get_tag_rules(self):
         cur = self.conn.execute(
             "SELECT id, position, search, replace "
@@ -798,6 +938,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.is_dirty = False
         self.created_at_value = ""
         self.updated_at_value = ""
+        self._filter_refresh_timeout_id = None
 
         self._build_ui()
         self._load_window_settings()
@@ -817,18 +958,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         self.library_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.details_box_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.media_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.library_box.set_size_request(100, -1)
         self.details_box.set_size_request(100, -1)
         self.media_box.set_size_request(100, -1)
+        self.details_box_container.set_margin_start(12)
+        self.details_box_container.pack_start(self.details_box, True, True, 0)
 
         self.main_paned.add1(self.library_box)
         self.right_paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.right_paned.add1(self.details_box)
+        self.right_paned.add1(self.details_box_container)
         self.right_paned.add2(self.media_box)
         self.main_paned.add2(self.right_paned)
-        self.main_paned.set_wide_handle(True)
-        self.right_paned.set_wide_handle(True)
+        self.main_paned.set_wide_handle(False)
+        self.right_paned.set_wide_handle(False)
 
         self._build_library()
         self._build_details()
@@ -898,18 +1042,16 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self.filter_sort.append("title", "По названию")
         self.filter_sort.append("created_at", "По дате добавления")
         self.filter_sort.set_active_id("title")
+        self.filter_name.connect("changed", lambda _e: self._schedule_refresh_titles())
+        self.filter_tags.connect("changed", lambda _e: self._schedule_refresh_titles())
+        self.filter_sort.connect("changed", lambda _e: self._schedule_refresh_titles())
         filter_box.pack_start(self._row("Название", self.filter_name), False, False, 0)
         filter_box.pack_start(self._row("Теги", self.filter_tags), False, False, 0)
         filter_box.pack_start(self._row("Статус", self.filter_status_button), False, False, 0)
         filter_box.pack_start(self._row("Сортировка", self.filter_sort), False, False, 0)
-        apply_button = Gtk.Button(label="Применить")
-        apply_button.connect("clicked", lambda _b: self.refresh_titles())
         reset_button = Gtk.Button(label="Сбросить")
         reset_button.connect("clicked", lambda _b: self.reset_filters())
-        filter_buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        filter_buttons.pack_start(apply_button, True, True, 0)
-        filter_buttons.pack_start(reset_button, True, True, 0)
-        filter_box.pack_start(filter_buttons, False, False, 0)
+        filter_box.pack_start(reset_button, False, False, 0)
         self._update_filter_status_button_label()
         self.library_box.pack_start(filter_frame, False, False, 0)
 
@@ -1243,6 +1385,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
     def _on_filter_status_toggled(self, _button: Gtk.CheckButton) -> None:
         self._update_filter_status_button_label()
+        self._schedule_refresh_titles()
 
     def reset_filters(self) -> None:
         self.filter_name.set_text("")
@@ -1251,7 +1394,23 @@ class HSorterWindow(Gtk.ApplicationWindow):
             check.set_active(False)
         self.filter_sort.set_active_id("title")
         self._update_filter_status_button_label()
+        self._cancel_scheduled_filter_refresh()
         self.refresh_titles()
+
+    def _cancel_scheduled_filter_refresh(self) -> None:
+        if self._filter_refresh_timeout_id is None:
+            return
+        GLib.source_remove(self._filter_refresh_timeout_id)
+        self._filter_refresh_timeout_id = None
+
+    def _schedule_refresh_titles(self) -> None:
+        self._cancel_scheduled_filter_refresh()
+        self._filter_refresh_timeout_id = GLib.timeout_add(500, self._run_scheduled_refresh_titles)
+
+    def _run_scheduled_refresh_titles(self) -> bool:
+        self._filter_refresh_timeout_id = None
+        self.refresh_titles()
+        return False
 
     # Обновление списка тайтлов слева с учётом фильтров.
     def refresh_titles(self) -> None:
@@ -1323,7 +1482,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
             self.db.update_title_cover(title_id, cached_cover)
         self.main_title.set_text(title["main_title"])
         self.alt_titles.set_text(title["alt_titles"])
-        self.rating_entry.set_text("" if title["rating"] is None else str(title["rating"]))
+        self.rating_entry.set_text(
+            "" if title["rating"] is None else f"{float(title['rating']):.2f}"
+        )
         self.personal_rating_entry.set_text(
             "" if title["personal_rating"] is None else str(title["personal_rating"])
         )
@@ -1479,10 +1640,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
     # Считать значения формы в словарь для сохранения.
     def collect_form_data(self) -> dict:
         status_data = {status: check.get_active() for status, check in self.status_checks.items()}
+        tags_value = "; ".join(self._normalize_tag_tokens(self._get_tags_text()))
+        status_data["отсутствуют теги"] = tags_value == ""
         return {
             "main_title": self.main_title.get_text().strip(),
             "alt_titles": self.alt_titles.get_text().strip(),
-            "rating": self._parse_optional_int(self.rating_entry.get_text().strip()),
+            "rating": self._parse_optional_float(self.rating_entry.get_text().strip()),
             "personal_rating": self._parse_optional_int(
                 self.personal_rating_entry.get_text().strip()
             ),
@@ -1511,7 +1674,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             ).strip(),
             "url": self.url_entry.get_text().strip(),
             "status": status_data,
-            "tags": self._get_tags_text().strip(),
+            "tags": tags_value,
             "cover_path": self.cover_path,
             "created_at": self.created_at_value,
             "updated_at": self.updated_at_value,
@@ -1577,7 +1740,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         self._mark_dirty()
 
     def _normalize_tag_tokens(self, raw_tags: str) -> list[str]:
-        normalized = (raw_tags or "").replace(",", ";")
+        normalized = (raw_tags or "").replace("\r", "\n")
+        for separator in [",", "\n"]:
+            normalized = normalized.replace(separator, ";")
         parts = [part.strip() for part in normalized.split(";") if part.strip()]
         return parts
 
@@ -1879,6 +2044,15 @@ class HSorterWindow(Gtk.ApplicationWindow):
         except ValueError:
             return None
 
+    def _parse_optional_float(self, value: str) -> float | None:
+        if not value:
+            return None
+        normalized = value.replace(",", ".")
+        try:
+            return float(normalized)
+        except ValueError:
+            return None
+
     def on_year_start_changed(self, _spin) -> None:
         start_year = int(self.year_start.get_value())
         end_year_text = self.year_end.get_text().strip()
@@ -1956,6 +2130,51 @@ class HSorterWindow(Gtk.ApplicationWindow):
             "username": self.db.get_setting("anidb_username") or "",
             "password": self.db.get_setting("anidb_password") or "",
         }
+
+    def _get_emby_settings(self) -> dict:
+        return {
+            "server": self.db.get_setting("emby_server") or "",
+            "api_key": self.db.get_setting("emby_api_key") or "",
+            "user_id": self.db.get_setting("emby_user_id") or "",
+            "server_id": self.db.get_setting("emby_server_id") or "",
+            "parent_id": self.db.get_setting("emby_parent_id") or "",
+        }
+
+    def _emby_base_url(self, server: str) -> str:
+        value = (server or "").strip()
+        if not value:
+            return ""
+        if value.startswith(("http://", "https://")):
+            return value.rstrip("/")
+        return f"http://{value}".rstrip("/")
+
+    def _check_emby_connection(self, settings: dict) -> tuple[bool, str]:
+        base_url = self._emby_base_url(settings.get("server", ""))
+        if not base_url:
+            return False, "Укажите адрес сервера Emby."
+        if not settings.get("api_key"):
+            return False, "Укажите API ключ Emby."
+        params = {"api_key": settings["api_key"]}
+        try:
+            info_resp = requests.get(f"{base_url}/System/Info", params=params, timeout=15)
+            info_resp.raise_for_status()
+            server_name = info_resp.json().get("ServerName", "Emby")
+        except Exception as exc:
+            return False, f"Не удалось подключиться к Emby: {exc}"
+
+        user_id = (settings.get("user_id") or "").strip()
+        if user_id:
+            try:
+                user_resp = requests.get(
+                    f"{base_url}/Users/{user_id}",
+                    params=params,
+                    timeout=15,
+                )
+                user_resp.raise_for_status()
+            except Exception as exc:
+                return False, f"Подключение есть, но пользователь недоступен: {exc}"
+
+        return True, f"Подключение к {server_name} успешно."
 
     def open_statistics_dialog(self) -> None:
         dialog = Gtk.Dialog(title="Статистика", transient_for=self, modal=True)
@@ -2124,6 +2343,9 @@ class HSorterWindow(Gtk.ApplicationWindow):
         validate_tags_button = Gtk.Button(label="Валидация тегов")
         validate_tags_button.connect("clicked", lambda _b: self.validate_tags())
         content.add(validate_tags_button)
+        export_emby_button = Gtk.Button(label="Экспорт данных в Emby")
+        export_emby_button.connect("clicked", lambda _b: self.export_to_emby())
+        content.add(export_emby_button)
         dialog.show_all()
         dialog.run()
         dialog.destroy()
@@ -2247,7 +2469,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         dialog.destroy()
 
     def validate_tags(self) -> None:
-        rows = self.db.conn.execute("SELECT id, tags FROM titles ORDER BY id").fetchall()
+        rows = self.db.conn.execute("SELECT id, tags, status_json FROM titles ORDER BY id").fetchall()
 
         dialog = Gtk.Dialog(title="Валидация тегов", transient_for=self, modal=True)
         dialog.set_deletable(False)
@@ -2285,17 +2507,40 @@ class HSorterWindow(Gtk.ApplicationWindow):
             tags = self._normalize_tag_tokens(raw)
             tags = self._apply_tag_rules(tags)
             tags = [tag.strip().lower() for tag in tags if tag and tag.strip()]
+            has_tagme = "tagme" in tags
+            tags = [tag for tag in tags if tag != "tagme"]
             validated = "; ".join(sorted(set(tags)))
-            if validated != raw.strip():
-                self.db.conn.execute("UPDATE titles SET tags=?, updated_at=? WHERE id=?", (
-                    validated,
-                    datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    row["id"],
-                ))
+
+            try:
+                status_data = json.loads(row["status_json"] or "{}")
+            except json.JSONDecodeError:
+                status_data = {}
+            status_changed = False
+
+            missing_tags_status = validated == ""
+            if bool(status_data.get("отсутствуют теги")) != missing_tags_status:
+                status_data["отсутствуют теги"] = missing_tags_status
+                status_changed = True
+
+            if has_tagme and not bool(status_data.get("неполные теги")):
+                status_data["неполные теги"] = True
+                status_changed = True
+
+            if validated != raw.strip() or status_changed:
+                self.db.conn.execute(
+                    "UPDATE titles SET tags=?, status_json=?, updated_at=? WHERE id=?",
+                    (
+                        validated,
+                        json.dumps(status_data, ensure_ascii=False),
+                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        row["id"],
+                    ),
+                )
                 updated += 1
             set_progress(f"Валидация тегов: {idx}/{total}", idx)
         self.db.conn.commit()
         self.db.replace_stats_cache("tags", "all", True, self._compute_tags())
+        self.db.replace_stats_cache("statuses", "all", True, self._compute_statuses())
         self.db.set_setting("stats_cache_updated_at", datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
 
         status_label.set_text(f"Готово. Обновлено тайтлов: {updated}.")
@@ -2443,7 +2688,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
         data = {}
         for row in rows:
             raw = row["tags"] or ""
-            parts = [p.strip() for p in raw.replace(",", ";").split(";") if p.strip()]
+            parts = self._normalize_tag_tokens(raw)
             for tag in parts:
                 data[tag] = data.get(tag, 0) + 1
         return data
@@ -2655,13 +2900,229 @@ class HSorterWindow(Gtk.ApplicationWindow):
         anidb_box.pack_start(grid, False, False, 0)
         content.add(anidb_frame)
 
+        emby_frame = Gtk.Frame(label="Emby")
+        emby_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        emby_box.set_margin_top(6)
+        emby_box.set_margin_bottom(6)
+        emby_box.set_margin_start(6)
+        emby_box.set_margin_end(6)
+        emby_frame.add(emby_box)
+
+        emby_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+        emby_server_entry = Gtk.Entry()
+        emby_api_key_entry = Gtk.Entry()
+        emby_user_id_entry = Gtk.Entry()
+        emby_server_id_entry = Gtk.Entry()
+        emby_parent_id_entry = Gtk.Entry()
+        emby_settings = self._get_emby_settings()
+        emby_server_entry.set_text(emby_settings["server"])
+        emby_api_key_entry.set_text(emby_settings["api_key"])
+        emby_user_id_entry.set_text(emby_settings["user_id"])
+        emby_server_id_entry.set_text(emby_settings["server_id"])
+        emby_parent_id_entry.set_text(emby_settings["parent_id"])
+
+        emby_labels = [
+            ("Сервер", emby_server_entry),
+            ("API ключ", emby_api_key_entry),
+            ("ID пользователя", emby_user_id_entry),
+            ("Server ID", emby_server_id_entry),
+            ("Parent ID", emby_parent_id_entry),
+        ]
+        for idx, (label, entry) in enumerate(emby_labels):
+            emby_grid.attach(Gtk.Label(label=label, xalign=0), 0, idx, 1, 1)
+            emby_grid.attach(entry, 1, idx, 1, 1)
+        emby_box.pack_start(emby_grid, False, False, 0)
+
+        test_button = Gtk.Button(label="Проверить подключение")
+
+        def build_emby_settings() -> dict:
+            return {
+                "server": emby_server_entry.get_text().strip(),
+                "api_key": emby_api_key_entry.get_text().strip(),
+                "user_id": emby_user_id_entry.get_text().strip(),
+                "server_id": emby_server_id_entry.get_text().strip(),
+                "parent_id": emby_parent_id_entry.get_text().strip(),
+            }
+
+        test_button.connect(
+            "clicked",
+            lambda _b: self._message(
+                "Emby",
+                self._check_emby_connection(build_emby_settings())[1],
+            ),
+        )
+        emby_box.pack_start(test_button, False, False, 0)
+        content.add(emby_frame)
+
         dialog.show_all()
         response = dialog.run()
         if response == Gtk.ResponseType.OK:
             self.db.set_setting("anidb_username", username_entry.get_text().strip())
             self.db.set_setting("anidb_password", password_entry.get_text())
+            current_emby = build_emby_settings()
+            self.db.set_setting("emby_server", current_emby["server"])
+            self.db.set_setting("emby_api_key", current_emby["api_key"])
+            self.db.set_setting("emby_user_id", current_emby["user_id"])
+            self.db.set_setting("emby_server_id", current_emby["server_id"])
+            self.db.set_setting("emby_parent_id", current_emby["parent_id"])
         dialog.destroy()
 
+
+    def export_to_emby(self) -> None:
+        settings = self._get_emby_settings()
+        ready, message = self._check_emby_connection(settings)
+        if not ready:
+            self._message("Emby", message)
+            return
+
+        base_url = self._emby_base_url(settings["server"])
+        params = {"api_key": settings["api_key"]}
+        if settings.get("server_id"):
+            params["serverId"] = settings["server_id"]
+
+        dialog = Gtk.Dialog(title="Экспорт в Emby", transient_for=self, modal=True)
+        dialog.add_button("Закрыть", Gtk.ResponseType.CLOSE)
+        close_button = dialog.get_widget_for_response(Gtk.ResponseType.CLOSE)
+        if close_button:
+            close_button.set_sensitive(False)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(10)
+        content.set_margin_bottom(10)
+        content.set_margin_start(10)
+        content.set_margin_end(10)
+        status_label = Gtk.Label(label="Подготовка...")
+        status_label.set_xalign(0)
+        progress = Gtk.ProgressBar()
+        progress.set_show_text(True)
+        content.add(status_label)
+        content.add(progress)
+        dialog.show_all()
+
+        def pump() -> None:
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        try:
+            items_params = params.copy()
+            items_params.update(
+                {
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Series",
+                    "Fields": "OriginalTitle,Path,ProviderIds,Tags",
+                    "Limit": "10000",
+                }
+            )
+            if settings.get("parent_id"):
+                items_params["ParentId"] = settings["parent_id"]
+            user_id = settings.get("user_id", "").strip()
+            if user_id:
+                items_url = f"{base_url}/Users/{user_id}/Items"
+            else:
+                items_url = f"{base_url}/Items"
+            emby_resp = requests.get(items_url, params=items_params, timeout=30)
+            emby_resp.raise_for_status()
+            emby_items = emby_resp.json().get("Items", [])
+
+            by_name = {}
+            by_dir = {}
+            for item in emby_items:
+                for value in [item.get("Name", ""), item.get("OriginalTitle", "")]:
+                    key = value.strip().lower()
+                    if key and key not in by_name:
+                        by_name[key] = item
+                path_value = (item.get("Path") or "").replace("\\", "/").rstrip("/")
+                if path_value:
+                    folder = path_value.split("/")[-1].strip().lower()
+                    if folder and folder not in by_dir:
+                        by_dir[folder] = item
+
+            title_rows = self.db.conn.execute(
+                "SELECT id, main_title, alt_titles, tags, url FROM titles ORDER BY id"
+            ).fetchall()
+            total = len(title_rows)
+            exported = 0
+            matched = 0
+
+            for idx, row in enumerate(title_rows, start=1):
+                names = [row["main_title"] or ""]
+                names.extend(
+                    [part.strip() for part in (row["alt_titles"] or "").split(";") if part.strip()]
+                )
+                title_dirs = []
+                media_rows = self.db.conn.execute(
+                    "SELECT path FROM media WHERE title_id=? AND media_type='video'",
+                    (row["id"],),
+                ).fetchall()
+                for media in media_rows:
+                    media_path = (media["path"] or "").replace("\\", "/").rstrip("/")
+                    if not media_path:
+                        continue
+                    parts = media_path.split("/")
+                    if len(parts) > 1:
+                        title_dirs.append(parts[-2].strip().lower())
+
+                emby_item = None
+                for name in names:
+                    key = name.lower().strip()
+                    if key in by_name:
+                        emby_item = by_name[key]
+                        break
+                if not emby_item:
+                    for folder in title_dirs:
+                        if folder in by_dir:
+                            emby_item = by_dir[folder]
+                            break
+
+                if emby_item:
+                    matched += 1
+                    item_id = emby_item.get("Id")
+                    if item_id:
+                        item_url = f"{base_url}/Users/{user_id}/Items/{item_id}" if user_id else f"{base_url}/Items/{item_id}"
+                        item_resp = requests.get(item_url, params=params, timeout=30)
+                        item_resp.raise_for_status()
+                        payload = item_resp.json()
+
+                        tags = [{"Name": tag} for tag in self._normalize_tag_tokens(row["tags"] or "")]
+                        payload["TagItems"] = tags
+
+                        providers = payload.get("ProviderIds") or {}
+                        anime_id = self._extract_anidb_id((row["url"] or "").strip())
+                        if anime_id:
+                            providers["AniDB"] = anime_id
+                            payload["ProviderIds"] = providers
+
+                        update_url = f"{base_url}/emby/Items/{item_id}"
+                        requests.post(
+                            update_url,
+                            params=params,
+                            data=json.dumps(payload),
+                            headers={"Content-Type": "application/json"},
+                            timeout=30,
+                        ).raise_for_status()
+                        exported += 1
+
+                status_label.set_text(
+                    f"Экспорт в Emby: {idx}/{total}. Сопоставлено: {matched}, экспортировано: {exported}."
+                )
+                progress.set_fraction(1.0 if total == 0 else idx / total)
+                progress.set_text(f"{idx}/{total}")
+                pump()
+
+            status_label.set_text(
+                f"Готово. Экспортировано: {exported} из {total}. Сопоставлено: {matched}."
+            )
+            progress.set_fraction(1.0 if total else 0.0)
+            progress.set_text(f"{total}/{total}" if total else "0/0")
+        except Exception as exc:
+            status_label.set_text(f"Ошибка экспорта: {exc}")
+            progress.set_text("Ошибка")
+        finally:
+            if close_button:
+                close_button.set_sensitive(True)
+
+        dialog.run()
+        dialog.destroy()
 
     def open_tagrules_dialog(self):
         dialog = Gtk.Dialog(
@@ -2953,58 +3414,87 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _extract_anidb_characters_tags(self, character_ids):
         """
         Извлекает имена тегов AniDB для списка идентификаторов персонажей.
-        Это метод класса, поэтому первым параметром идет self.
-        
+
         Args:
             character_ids (list): Список идентификаторов персонажей AniDB
-            
+
         Returns:
             list: Список уникальных имен тегов AniDB для всех персонажей
         """
-       
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        
+
+        total = len(character_ids or [])
         all_tags = []
-        
-        for index, character_id in enumerate(character_ids, 1):
-            try:
-                url = f"https://anidb.net/character/{character_id}"
-                print(f"Запрашиваю данные для персонажа ID: {character_id}")
-                
-                response = requests.get(url, headers=headers, timeout=10)
-                response.raise_for_status()
-                
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # Находим все span с классом "tagname"
-                tag_spans = soup.find_all('span', class_='tagname')
-                
-                # Извлекаем текстовое содержимое каждого span
-                tags = [span.get_text(strip=True) for span in tag_spans]
-                
-                # Добавляем теги в общий список
-                all_tags.extend(tags)
-                
-                print(f"  Найдено тегов: {len(tags)}")
-                
-                # Случайная задержка между запросами (1.0 - 3.0 секунды)
-                if index < len(character_ids):  # Не ставим задержку после последнего запроса
-                    delay = random.uniform(1.0, 3.0)
-                    print(f"  Задержка перед следующим запросом: {delay} сек.")
-                    time.sleep(delay)
-                
-            except requests.exceptions.RequestException as e:
-                print(f"  Ошибка при запросе ID {character_id}: {e}")
-            except Exception as e:
-                print(f"  Неожиданная ошибка для ID {character_id}: {e}")
-        
-        # Удаляем дубликаты, сохраняя порядок
-        unique_tags = list(dict.fromkeys(all_tags))
-        
-        print(f"\nВсего уникальных тегов найдено: {len(unique_tags)}")
-        return unique_tags
+        progress_dialog = None
+        progress_label = None
+        progress_bar = None
+        started_at = time.time()
+
+        if total > 0:
+            progress_dialog = Gtk.Dialog(
+                title="Синхронизация AniDB",
+                transient_for=self,
+                modal=True,
+            )
+            progress_dialog.set_deletable(False)
+            content = progress_dialog.get_content_area()
+            content.set_spacing(8)
+            content.set_margin_top(10)
+            content.set_margin_bottom(10)
+            content.set_margin_start(10)
+            content.set_margin_end(10)
+            progress_label = Gtk.Label(label="Загрузка тегов персонажей: 0/0")
+            progress_label.set_xalign(0)
+            progress_bar = Gtk.ProgressBar()
+            progress_bar.set_show_text(True)
+            content.add(progress_label)
+            content.add(progress_bar)
+            progress_dialog.show_all()
+
+        def update_progress(current: int) -> None:
+            if not progress_label or not progress_bar:
+                return
+            elapsed = max(time.time() - started_at, 0.001)
+            fraction = 1.0 if total == 0 else min(1.0, current / total)
+            if current > 0 and total > current:
+                per_item = elapsed / current
+                remaining = int(per_item * (total - current))
+                eta_text = f"Осталось ~{remaining} сек."
+            else:
+                eta_text = "Завершаем..." if total > 0 else ""
+            progress_label.set_text(
+                f"Загрузка тегов персонажей: {current}/{total}. {eta_text}".strip()
+            )
+            progress_bar.set_fraction(fraction)
+            progress_bar.set_text(f"{current}/{total}")
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        try:
+            update_progress(0)
+            for index, character_id in enumerate(character_ids, 1):
+                try:
+                    url = f"https://anidb.net/character/{character_id}"
+                    response = requests.get(url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    soup = BeautifulSoup(response.content, "html.parser")
+                    tag_spans = soup.find_all("span", class_="tagname")
+                    tags = [span.get_text(strip=True) for span in tag_spans]
+                    all_tags.extend(tags)
+                    if index < total:
+                        time.sleep(random.uniform(1.0, 3.0))
+                except requests.exceptions.RequestException:
+                    pass
+                except Exception:
+                    pass
+                update_progress(index)
+        finally:
+            if progress_dialog:
+                progress_dialog.destroy()
+
+        return list(dict.fromkeys(all_tags))
 
     def _download_anidb_cover(self, anime_node: ET.Element) -> str:
         picture_name = (anime_node.findtext("picture") or "").strip()
@@ -3174,10 +3664,12 @@ class HSorterWindow(Gtk.ApplicationWindow):
 
         action_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         copy_button = Gtk.Button(label="Копировать")
+        merge_button = Gtk.Button(label="Слияние")
         copy_all_button = Gtk.Button(label="Копировать всё")
         prev_button = Gtk.Button(label="Назад")
         next_button = Gtk.Button(label="Далее")
         action_row.pack_start(copy_button, False, False, 0)
+        action_row.pack_start(merge_button, False, False, 0)
         action_row.pack_start(copy_all_button, False, False, 0)
         action_row.pack_end(next_button, False, False, 0)
         action_row.pack_end(prev_button, False, False, 0)
@@ -3200,6 +3692,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
             remote_value = anidb_data.get(key, "")
             local_buffer.set_text(local_value)
             remote_buffer.set_text(remote_value)
+            merge_button.set_sensitive(key == "tags")
             if multiline:
                 local_view.set_size_request(-1, 180)
                 remote_view.set_size_request(-1, 180)
@@ -3230,6 +3723,21 @@ class HSorterWindow(Gtk.ApplicationWindow):
             data[key] = anidb_data.get(key, "")
             local_buffer.set_text(data[key])
 
+        def merge_current() -> None:
+            key, _, _ = fields[index]
+            if key != "tags":
+                return
+            local_raw = local_buffer.get_text(
+                local_buffer.get_start_iter(),
+                local_buffer.get_end_iter(),
+                True,
+            )
+            local_tags = self._normalize_tag_tokens(local_raw)
+            remote_tags = self._normalize_tag_tokens(anidb_data.get("tags", ""))
+            merged = sorted(set(local_tags + remote_tags))
+            data["tags"] = "; ".join(merged)
+            local_buffer.set_text(data["tags"])
+
         def copy_all() -> None:
             if not self._confirm(
                 "Скопировать всё", "Данные тайтла будут перезаписаны целиком! Продолжить?"
@@ -3256,6 +3764,7 @@ class HSorterWindow(Gtk.ApplicationWindow):
                 dialog.response(Gtk.ResponseType.OK)
 
         copy_button.connect("clicked", lambda _b: copy_current())
+        merge_button.connect("clicked", lambda _b: merge_current())
         copy_all_button.connect("clicked", lambda _b: copy_all())
         prev_button.connect("clicked", lambda _b: go_prev())
         next_button.connect("clicked", lambda _b: go_next())
@@ -3432,6 +3941,46 @@ class HSorterWindow(Gtk.ApplicationWindow):
         path_row.pack_start(path_entry, True, True, 0)
         path_row.pack_start(open_dir, False, False, 0)
         center_column.pack_start(path_row, False, False, 0)
+
+        hardsub_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        hardsub_check = Gtk.CheckButton(label="Хардсаб")
+        hardsub_lang_combo = Gtk.ComboBoxText()
+        hardsub_lang_combo.append_text("")
+        for code in ISO_639_1_CODES:
+            hardsub_lang_combo.append_text(code)
+        hardsub_row.pack_start(hardsub_check, False, False, 0)
+        hardsub_row.pack_start(Gtk.Label(label="Язык хардсаба (ISO 639-1)", xalign=0), False, False, 0)
+        hardsub_row.pack_start(hardsub_lang_combo, False, False, 0)
+        center_column.pack_start(hardsub_row, False, False, 0)
+
+        current_hardsub, current_hardsub_lang = self.db.get_video_hardsub_override(media_id)
+        hardsub_check.set_active(current_hardsub)
+        hardsub_lang_combo.set_sensitive(current_hardsub)
+        if current_hardsub_lang in ISO_639_1_CODES:
+            hardsub_lang_combo.set_active(ISO_639_1_CODES.index(current_hardsub_lang) + 1)
+        else:
+            hardsub_lang_combo.set_active(0)
+
+        def persist_video_hardsub() -> None:
+            lang = hardsub_lang_combo.get_active_text() or ""
+            enabled = hardsub_check.get_active()
+            self.db.upsert_track_override(media_id, "__video__", -1, "", enabled, lang)
+            has_hardsub = self.db.title_has_hardsub_video(media_row["title_id"])
+            self.db.set_title_status_flag(media_row["title_id"], "хардсаб", has_hardsub)
+            if self.current_title_id == media_row["title_id"] and "хардсаб" in self.status_checks:
+                was_dirty = self.is_dirty
+                self.status_checks["хардсаб"].set_active(has_hardsub)
+                if not was_dirty:
+                    self._clear_dirty()
+                self.updated_at_value = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                self.updated_at_label.set_text(self._format_date(self.updated_at_value))
+            self.refresh_titles()
+
+        hardsub_check.connect(
+            "toggled",
+            lambda _b: (hardsub_lang_combo.set_sensitive(hardsub_check.get_active()), persist_video_hardsub()),
+        )
+        hardsub_lang_combo.connect("changed", lambda _b: persist_video_hardsub())
 
         def set_thumbnail(path_value: str) -> None:
             nonlocal thumb_path
