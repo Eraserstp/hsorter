@@ -3036,58 +3036,87 @@ class HSorterWindow(Gtk.ApplicationWindow):
     def _extract_anidb_characters_tags(self, character_ids):
         """
         Извлекает имена тегов AniDB для списка идентификаторов персонажей.
-        Это метод класса, поэтому первым параметром идет self.
-        
+
         Args:
             character_ids (list): Список идентификаторов персонажей AniDB
-            
+
         Returns:
             list: Список уникальных имен тегов AniDB для всех персонажей
         """
-       
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-        
+
+        total = len(character_ids or [])
         all_tags = []
-        
-        for index, character_id in enumerate(character_ids, 1):
-            try:
-                url = f"https://anidb.net/character/{character_id}"
-                print(f"Запрашиваю данные для персонажа ID: {character_id}")
-                
-                response = requests.get(url, headers=headers, timeout=10)
-                response.raise_for_status()
-                
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # Находим все span с классом "tagname"
-                tag_spans = soup.find_all('span', class_='tagname')
-                
-                # Извлекаем текстовое содержимое каждого span
-                tags = [span.get_text(strip=True) for span in tag_spans]
-                
-                # Добавляем теги в общий список
-                all_tags.extend(tags)
-                
-                print(f"  Найдено тегов: {len(tags)}")
-                
-                # Случайная задержка между запросами (1.0 - 3.0 секунды)
-                if index < len(character_ids):  # Не ставим задержку после последнего запроса
-                    delay = random.uniform(1.0, 3.0)
-                    print(f"  Задержка перед следующим запросом: {delay} сек.")
-                    time.sleep(delay)
-                
-            except requests.exceptions.RequestException as e:
-                print(f"  Ошибка при запросе ID {character_id}: {e}")
-            except Exception as e:
-                print(f"  Неожиданная ошибка для ID {character_id}: {e}")
-        
-        # Удаляем дубликаты, сохраняя порядок
-        unique_tags = list(dict.fromkeys(all_tags))
-        
-        print(f"\nВсего уникальных тегов найдено: {len(unique_tags)}")
-        return unique_tags
+        progress_dialog = None
+        progress_label = None
+        progress_bar = None
+        started_at = time.time()
+
+        if total > 0:
+            progress_dialog = Gtk.Dialog(
+                title="Синхронизация AniDB",
+                transient_for=self,
+                modal=True,
+            )
+            progress_dialog.set_deletable(False)
+            content = progress_dialog.get_content_area()
+            content.set_spacing(8)
+            content.set_margin_top(10)
+            content.set_margin_bottom(10)
+            content.set_margin_start(10)
+            content.set_margin_end(10)
+            progress_label = Gtk.Label(label="Загрузка тегов персонажей: 0/0")
+            progress_label.set_xalign(0)
+            progress_bar = Gtk.ProgressBar()
+            progress_bar.set_show_text(True)
+            content.add(progress_label)
+            content.add(progress_bar)
+            progress_dialog.show_all()
+
+        def update_progress(current: int) -> None:
+            if not progress_label or not progress_bar:
+                return
+            elapsed = max(time.time() - started_at, 0.001)
+            fraction = 1.0 if total == 0 else min(1.0, current / total)
+            if current > 0 and total > current:
+                per_item = elapsed / current
+                remaining = int(per_item * (total - current))
+                eta_text = f"Осталось ~{remaining} сек."
+            else:
+                eta_text = "Завершаем..." if total > 0 else ""
+            progress_label.set_text(
+                f"Загрузка тегов персонажей: {current}/{total}. {eta_text}".strip()
+            )
+            progress_bar.set_fraction(fraction)
+            progress_bar.set_text(f"{current}/{total}")
+            while Gtk.events_pending():
+                Gtk.main_iteration_do(False)
+
+        try:
+            update_progress(0)
+            for index, character_id in enumerate(character_ids, 1):
+                try:
+                    url = f"https://anidb.net/character/{character_id}"
+                    response = requests.get(url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    soup = BeautifulSoup(response.content, "html.parser")
+                    tag_spans = soup.find_all("span", class_="tagname")
+                    tags = [span.get_text(strip=True) for span in tag_spans]
+                    all_tags.extend(tags)
+                    if index < total:
+                        time.sleep(random.uniform(1.0, 3.0))
+                except requests.exceptions.RequestException:
+                    pass
+                except Exception:
+                    pass
+                update_progress(index)
+        finally:
+            if progress_dialog:
+                progress_dialog.destroy()
+
+        return list(dict.fromkeys(all_tags))
 
     def _download_anidb_cover(self, anime_node: ET.Element) -> str:
         picture_name = (anime_node.findtext("picture") or "").strip()
