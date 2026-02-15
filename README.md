@@ -70,7 +70,7 @@ python3 amc_import.py /path/to/export.xml /path/to/hsorter.sqlite
 - `beautifulsoup4`
 - `mediainfo` (CLI) и/или `pymediainfo`
 - `ffmpeg`/`ffprobe` (миниатюры видео)
-- `7z` или `7zz` (резервные копии)
+- `py7zr` (резервные копии в формате 7z)
 
 ## Данные
 
